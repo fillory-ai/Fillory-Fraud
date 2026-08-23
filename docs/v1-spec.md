@@ -72,6 +72,12 @@ removed because of us.
 | Coverage | Fixed queries, Portland | Per-org markets, measured recall |
 | Observability | Log files | Health, metrics, failure alerts, cost tracking |
 | Cost | Unknown | Metered per org |
+| Firm's own listings | Would be flagged as fraud | Authorized-poster allowlist + property lifecycle |
+| Being wrong | No path | Retraction, counter-notice handling, wrongful-filing metric |
+| Source risk | Unmanaged | Schema validation, hot-spare actors, health per dependency |
+| Migrations | Hand-written `ALTER TABLE` strings | Alembic |
+| Testing | Manual local runs | CI on every push + nightly |
+| Environments | Laptop only | Staging + production Neon branches |
 
 ---
 
@@ -164,6 +170,23 @@ v1 must measure recall before claiming coverage:
 `SCRAPE_CITY` / `SCRAPE_STATE` globals are replaced by a `markets` table.
 A firm with units in Portland and Vancouver WA gets both scanned.
 
+### Source resilience and vendor risk
+
+The entire product sits on top of two data sources we do not control, one of
+which we reach through a third party. This is the single largest operational
+risk in v1 and v0 has no mitigation at all.
+
+| Risk | Mitigation in v1 |
+|---|---|
+| Apify actor is deprecated, breaks, or changes its output shape | Schema-validate every scrape result; a shape change fails loudly instead of silently returning zero rows. Keep a second actor identified per source as a hot spare. |
+| Apify account limits / billing failure | Quota tracking with a threshold alarm; scans degrade to a reduced cadence rather than dying. |
+| Craigslist starts blocking our self-hosted detail fetches | Measured today at 50/50 HTTP 200 with no proxy. Track the enrichment success rate per scan as a first-class metric; a sustained drop pages us. Proxy support behind a config flag, unused until needed. |
+| Facebook detail pages remain unreachable | **Accepted limitation.** FB enrichment needs proxies or session cookies and was never attempted. We do not need it: measured FB data already gives 100% descriptions, 100% images, and ZIP+4 80% of the time. Do not build this unless a measurement says we must. |
+| Nominatim rate limits or bans us | 1.1s throttle already enforced. v1 adds a persistent geocode cache keyed on the normalized address so we never ask twice, and a fallback provider behind an interface. |
+
+**Rule:** every external dependency reports a health state, and "returned zero
+rows" is treated as a failure to investigate, never as "no fraud found."
+
 ---
 
 ## 6. Detection
@@ -198,6 +221,50 @@ because *address + photos* is categorically stronger than either alone:
 
 Only **Confirmed** may proceed to enforcement without human review — and even
 then, a human still signs (§8).
+
+### The firm's own listings *(missing requirement, high severity)*
+
+A registered property that is actually vacant will be advertised on Craigslist
+and Facebook **by the firm itself** — with the correct address and the firm's
+own photos. Under v0's logic that is a perfect match on every signal, including
+layer 3. The first thing the system would do on a real portfolio is flag its
+own customer's marketing.
+
+v1 needs an explicit legitimacy allowlist before it ever sees a real portfolio:
+
+- **Authorized posters** per org: known poster names, contact emails, phone
+  numbers, and marketplace account URLs/IDs. A match against one of these
+  resolves to `authorized`, not `fraud`, regardless of signal strength.
+- **Syndication domains**: listings whose contact or apply link points at the
+  firm's own site or its listing syndicators are authorized.
+- **One-click teach**: reviewing a case offers "this is ours" — which records
+  the poster identity as authorized for that org and re-resolves any other open
+  case sharing it.
+- **Property lifecycle**: `occupied` / `marketing` / `off-market`. A property in
+  `marketing` expects legitimate listings and biases toward `authorized`; a
+  property in `occupied` should have no listings at all, so any match there is
+  materially more suspicious and escalates a tier.
+
+This also improves detection quality rather than just suppressing noise: a
+listing that matches the property but is *not* from an authorized poster while
+the unit is occupied is close to a definitive impersonation.
+
+### AI dependency and prompt regression
+
+Gemini is reached via the Workshop proxy, and v0 already lost two model names
+to deprecation (`gemini-2.5-flash-preview-04-17`, `gemini-2.0-flash`). Model
+drift is a certainty, not a risk.
+
+- Primary + fallback model configured; a hard failure resolves to `unknown`,
+  never to `fraud`. *(Already true in v0 — keep it true.)*
+- A **golden-set prompt regression suite** committed alongside
+  `test_matcher.py`: fixed listings with expected verdict and confidence bands.
+  Run it in CI and on every model change. A model swap that shifts calibration
+  is a release blocker.
+- Verdict distribution monitored in production; a sudden shift in the
+  fraud/legitimate/unknown mix means the model changed under us.
+- Cost and latency per call recorded, since the matcher is the gate that keeps
+  AI spend proportional to matches rather than to listings.
 
 ### Recall validation *(currently zero)*
 
@@ -325,6 +392,27 @@ in the firm brief matters — **without owning the copyright, there is no
 leverage.** Enforcement effectiveness is a direct function of how complete the
 photo library is.
 
+### When we are wrong — reversal and counter-notice
+
+A wrongful takedown is the worst failure mode this product has. It harms an
+innocent poster, exposes the firm to §512(f) liability for material
+misrepresentation, and ends the customer relationship. It must be a designed
+path, not an incident.
+
+- **Pre-filing gate:** a notice can only be generated from a Confirmed case
+  with a complete evidence pack. The attestation screen shows the signer the
+  evidence, not a summary.
+- **Retraction:** one action retracts a filed notice, sends a withdrawal to the
+  same channel it was filed through, and freezes further action on the case.
+- **Counter-notice handling:** if a poster counter-notices, the case moves to
+  `disputed`, all automation on it stops, and the firm's signer plus Fillory
+  are both notified. We never re-file on a disputed case automatically.
+- **Post-mortem record:** every reversal is logged with the signals that
+  produced it and, where the fault is ours, becomes a permanent regression case
+  in `test_matcher.py` or the golden set.
+- **Metric:** wrongful-filing rate is reported on the internal dashboard beside
+  time-to-takedown. If it is not zero we stop filing.
+
 ---
 
 ## 9. Onboarding
@@ -340,8 +428,10 @@ Self-serve wizard, target **under 15 minutes**:
 4. **Photos** — drag-and-drop per property, or supply public listing URLs and
    we scrape them (the recommended option in the firm brief).
 5. **Alert routing** — recipients, channels, quiet hours.
-6. **Authorization** — e-sign the agent authorization; designate signer.
-7. **Observe mode** — 7 days of silent running, then a review before alerts go
+6. **Authorized posters** — the accounts, names, emails and phone numbers the
+   firm advertises under, so we never flag their own marketing (§6).
+7. **Authorization** — e-sign the agent authorization; designate signer.
+8. **Observe mode** — 7 days of silent running, then a review before alerts go
    live.
 
 ---
@@ -381,6 +471,30 @@ listings-shared-per-market design exists specifically to keep it low.
 Define and publish: listings 12 months, evidence packs 7 years (legal record),
 property photos retained only as hashes after processing.
 
+### Engineering practice *(gaps carried from v0)*
+
+None of this is glamorous, and all of it is load-bearing once a real customer
+depends on the system running unattended.
+
+| Gap in v0 | v1 requirement |
+|---|---|
+| Migrations are a hand-maintained list of `ALTER TABLE ... IF NOT EXISTS` strings in `database.py` | Move to **Alembic**. Additive-only strings cannot express a backfill, a constraint, an index, or the dedup collapse M1 needs — and they cannot be rolled back. |
+| No CI | GitHub Actions on every push: `test_matcher.py`, the golden-set prompt suite, `tsc --noEmit`, ruff. A red build blocks merge. |
+| Tests run only when I remember | Above, plus a nightly run against live-shaped fixtures to catch source drift. |
+| One environment — the laptop | **Staging and production**, separate Neon branches. Never test a scraper change against production data. |
+| No backups verified | Neon PITR confirmed and a restore actually rehearsed once. An untested backup is not a backup. |
+| Not published; no deploy path | Publish via Workshop; document rollback. `TWILIO_ENABLED` flips only after the final URL is verified, and only after observe mode passes. |
+| `uvicorn --reload` watching project files | Production runs without reload. Editing a `.py` file mid-scan currently aborts the scan — acceptable locally, fatal in prod. |
+| Test data mixed with real data | Purge the Austin test property and the remaining `manual` row before the first customer, or move them to a seeded staging branch. Production must contain only real records. |
+| No error tracking | Structured logging plus an exception tracker; unhandled exceptions in the scan pipeline must surface, not vanish into a log file. |
+
+### Support and SLA
+
+Before the design partner goes live, state plainly: expected scan cadence,
+what we promise about detection (best-effort, coverage figure published, recall
+measured), target time-to-notice, and how they reach a human. An unattended
+system still needs a named owner when it breaks.
+
 ---
 
 ## 11. Security and legal
@@ -401,21 +515,25 @@ property photos retained only as hashes after processing.
 
 | # | Milestone | Contents | Blocks |
 |---|---|---|---|
-| **M1** | *Trustworthy* | Dedup + upsert, alert dedup, scheduler, failure alerting, observe mode | — |
-| **M2** | *Verified* | Historical scam replay, recall measurement, coverage measurement | Needs firm's scam examples |
-| **M3** | *Multi-tenant* | Orgs, Neon Auth, RLS, shared-listing refactor, alert routing | — |
+| **M0** | *Foundation* | Alembic, CI (matcher + golden set + tsc + ruff), staging branch, error tracking | — |
+| **M1** | *Trustworthy* | Dedup + upsert + backfill collapse, alert dedup, scheduler, failure alerting, observe mode, source health metrics | M0 for the migration |
+| **M2** | *Verified* | Historical scam replay, recall measurement, coverage measurement, golden-set prompt suite | Needs firm's scam examples |
+| **M3** | *Multi-tenant* | Orgs, Neon Auth, RLS, shared-listing refactor, alert routing, authorized-poster allowlist, property lifecycle | — |
 | **M4** | *Proof* | Layer 3 pHash steps 1–5, then 6–7 | 6–7 need firm's photos |
-| **M5** | *Enforcement* | Evidence packs, notice generation, attestation UI, delivery, tracking | Needs signed authorization + counsel |
-| **M6** | *Self-serve* | Onboarding wizard, USPS ZIP+4 API, photo ingest, billing | — |
-| **M7** | *Production* | Publish, enable Twilio, cost dashboard, retention, 30-day unattended run | All |
+| **M5** | *Enforcement* | Evidence packs, notice generation, attestation UI, delivery, tracking, retraction + counter-notice | Needs signed authorization + counsel |
+| **M6** | *Self-serve* | Onboarding wizard, USPS ZIP+4 API, photo ingest, authorized posters capture, billing | — |
+| **M7** | *Production* | Publish, backups rehearsed, enable Twilio, cost dashboard, retention, SLA, 30-day unattended run | All |
 
-**Recommended order:** M1 → M2 → M4(1–5) → M3 → M5 → M6 → M7.
+**Recommended order:** M0 → M1 → M2 → M4(1–5) → M3 → M5 → M6 → M7.
 
-Rationale: M1 makes the current system non-annoying, M2 tells us whether it
+Rationale: M0 is small and everything else is safer with it in place —
+particularly M1, whose duplicate-collapse cannot be expressed as an additive
+`ALTER TABLE`. M1 makes the current system non-annoying, M2 tells us whether it
 actually works, and M4 steps 1–5 need nothing from anyone. M3's multi-tenancy
 is a big refactor with no customer-visible value, so it comes after we've
 confirmed the core is sound — but before M5, since enforcement needs org-scoped
-authorization records.
+authorization records. The authorized-poster allowlist rides with M3 because it
+is org-scoped, and it **must** land before any real portfolio is loaded.
 
 ---
 
@@ -430,8 +548,16 @@ authorization records.
    one-at-a-time.
 4. **Pricing model** — per property, per market, or flat? Needs the cost
    numbers from §10.
-5. **What happens on a false takedown?** We need a documented reversal process
-   before we file the first notice.
+5. **What happens on a false takedown?** Now specified in §8 (retraction,
+   counter-notice, wrongful-filing metric) — what remains open is whether
+   counsel wants a mandatory cooling-off period before filing.
 6. **Does the firm want tenant-facing warnings?** A public "verify your listing"
    page is a plausible v2 surface and changes nothing in v1, but affects how we
    store evidence.
+7. **How does the firm advertise vacancies?** Which accounts, which
+   syndicators, which contact details. This populates the authorized-poster
+   allowlist and is required before their portfolio is loaded — otherwise the
+   first scan flags their own marketing.
+8. **What is the acceptable alert volume?** A firm with 400 units in a scam-heavy
+   market may generate more Confirmed cases than one signer can attest to. If
+   so, enforcement needs batch attestation, which changes the §8 UI.
