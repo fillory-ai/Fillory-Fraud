@@ -492,6 +492,10 @@ detection.
 | **ZIP+4 not yet populated** for either property | Signal 4 is inert | Look up + enter (see firm brief) |
 | **Layer 3 (image pHash) not built** | Cannot prove impersonation on Facebook | Spec written; steps 1–5 buildable now |
 | **The firm's own marketing listings match their own properties** on every signal | A real portfolio would flag the customer's own vacancy ads on day one | Authorized-poster allowlist + property lifecycle — specified in v1-spec §6, not built |
+| **Scan health is global, not per-source** | Facebook could return 0 rows for weeks and health stays green as long as Craigslist works — the customer reads "0 fraud found" as good news | M1.5, `docs/connector-resilience-spec.md` |
+| **A source that succeeds with an empty dataset is recorded as healthy** | `source_ok[src] = True` is set regardless of row count — and worse, `scraper.py` catches every exception and returns `[]`, so Apify outages, 403s and timeouts all arrive as "succeeded, zero rows" too. Most likely way we break, currently invisible | M1.5 §3.1 + §3.4 |
+| **No field-completeness floors** | Measured rates (CL 100% descriptions post-enrichment, FB 91% location) live as prose, not assertions. If a field stops arriving, Gemini quietly returns "unknown" and every dashboard number still looks normal | M1.5 §3.5 |
+| **Apify actor IDs unpinned** | An upstream author's breaking change lands in production with no action from us, and we can't correlate a breakage with a release | M1.5 §3.6 |
 | Scheduler exists but is off (`SCHEDULER_ENABLED=false`) | Scanning is still manual in practice | Flip once Apify spend is agreed |
 | Facebook detail pages not fetched | No body enrichment beyond what search returns | Would need proxies + session cookies |
 | Recall unmeasured | We know precision looks sane; we do not know what we miss | M2 — needs the firm's historical scams |
@@ -505,7 +509,7 @@ detection.
 | Check | Result |
 |---|---|
 | `test_matcher.py` | 17/17 passing |
-| `test_pipeline.py` | 49/49 — identity, fingerprint gating, case dedup, cooldown in *and* out of observe mode, rate-cap suppression, notifier exceptions, both delisting guards, losing insert claim |
+| `test_pipeline.py` | 45/45 — identity, fingerprint gating, case dedup, cooldown in *and* out of observe mode, rate-cap suppression, notifier exceptions, both delisting guards, losing insert claim |
 | `test_migration_collapse.py` | 19/19 — builds the pre-M1 schema in a scratch PostgreSQL schema, plants duplicates whose later sighting holds the verdict, proves the merge, then downgrade→upgrade |
 | `test_case_api.py` | 8/8 — `PUT` and `GET /api/cases` agree on shape (needs the dev server up) |
 | Gemini calibration | scam→fraud 1.0, legit→legitimate 0.95, unrelated→unknown 0.0 |

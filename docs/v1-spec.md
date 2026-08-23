@@ -517,6 +517,7 @@ system still needs a named owner when it breaks.
 |---|---|---|---|
 | **M0** | *Foundation* | ~~Alembic~~ **done**; CI (matcher + golden set + tsc + ruff), staging branch, error tracking still open | — |
 | **M1** | *Trustworthy* | ~~Dedup + upsert + backfill collapse, alert dedup by case, scheduler, failure alerting, observe mode, source health metrics~~ **done** | M0 for the migration |
+| **M1.5** | *Resilient* | Per-source health, field-completeness floors, coverage widget, actor version pinning, best-effort coverage language — see `connector-resilience-spec.md` | M1 for `source_counts` |
 | **M2** | *Verified* | Historical scam replay, recall measurement, coverage measurement, golden-set prompt suite | Needs firm's scam examples |
 | **M3** | *Multi-tenant* | Orgs, Neon Auth, RLS, shared-listing refactor, alert routing, authorized-poster allowlist, property lifecycle | — |
 | **M4** | *Proof* | Layer 3 pHash steps 1–5, then 6–7 | 6–7 need firm's photos |
@@ -526,10 +527,11 @@ system still needs a named owner when it breaks.
 
 **Status (2026-08-23):** M0's Alembic work and all of M1 are built and
 committed; see `system-spec.md` §3 for the behaviour as shipped. M0's CI,
-staging branch and error tracking are not. Next up is M2, which is blocked on
-the firm's historical scam examples.
+staging branch and error tracking are not. **M1.5 (connector resilience) is
+specified but not built** — `docs/connector-resilience-spec.md`. M2 is blocked
+on the firm's historical scam examples.
 
-**Recommended order:** M0 → M1 → M2 → M4(1–5) → M3 → M5 → M6 → M7.
+**Recommended order:** M0 → M1 → M1.5 → M2 → M4(1–5) → M3 → M5 → M6 → M7.
 
 Rationale: M0 is small and everything else is safer with it in place —
 particularly M1, whose duplicate-collapse cannot be expressed as an additive
