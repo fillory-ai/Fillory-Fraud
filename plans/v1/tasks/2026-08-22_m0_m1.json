@@ -1,32 +1,32 @@
 [
   {
-    "id": "m0",
     "content": "[M0-1] Alembic: install, env.py wired to Base/engine, baseline rev, init_db runs upgrade head",
-    "status": "pending"
+    "id": "m0",
+    "status": "completed"
   },
   {
-    "id": "m1-schema",
     "content": "[M1-1] Rev: listing identity cols + UNIQUE(source,external_id) + cases table + duplicate backfill",
-    "status": "pending"
+    "id": "m1-schema",
+    "status": "completed"
   },
   {
-    "id": "m1-upsert",
     "content": "[M1-2] Upsert in scan pipeline; skip re-analysis unless material change",
-    "status": "pending"
+    "id": "m1-upsert",
+    "status": "completed"
   },
   {
-    "id": "m1-alerts",
     "content": "[M1-3] Case-based alert dedup, observe mode, daily rate limit",
-    "status": "pending"
+    "id": "m1-alerts",
+    "status": "completed"
   },
   {
-    "id": "m1-sched",
     "content": "[M1-4] APScheduler + scan-failure/staleness alerting + status endpoints",
-    "status": "pending"
+    "id": "m1-sched",
+    "status": "completed"
   },
   {
-    "id": "m1-ui",
     "content": "[M1-5] UI: scheduler/health card, seen counts, cases tab; end-to-end verify",
-    "status": "pending"
+    "id": "m1-ui",
+    "status": "completed"
   }
 ]

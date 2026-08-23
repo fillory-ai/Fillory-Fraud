@@ -116,6 +116,11 @@ class ScrapedListing(Base):
     # get to "this listing was taken down", and the signal enforcement tracking
     # needs to prove a takedown worked.
     delisted_at = Column(DateTime(timezone=True), nullable=True)
+    # How many consecutive *qualifying* scans of this source have come back
+    # without this listing. A listing is only delisted once this crosses
+    # DELIST_MISS_THRESHOLD, so one short page of results can't retire a live
+    # scam. Reset to 0 on every re-sighting.
+    consecutive_misses = Column(Integer, default=0, nullable=False)
     # Hash of the fields that would change our verdict. Unchanged fingerprint
     # on re-sighting means we can skip re-running the AI, which is the main
     # cost gate on scanning frequently.
@@ -271,6 +276,10 @@ class ScanLog(Base):
     # sustained drop here means the scraper is being blocked — the failure mode
     # that would otherwise look like "no fraud found".
     enrichment_rate = Column(Float, nullable=True)
+    # JSON map of source → row count for this scan. Feeds the delisting
+    # coverage guard: we can only tell "the market is empty" from "the scraper
+    # returned half a page" by comparing against recent scans.
+    source_counts = Column(Text, nullable=True)
     fraud_found = Column(Integer, default=0)
     alerts_sent = Column(Integer, default=0)
     status = Column(String(50), default="running")  # "running", "completed", "failed"

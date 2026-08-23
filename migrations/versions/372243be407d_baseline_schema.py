@@ -102,4 +102,8 @@ def downgrade() -> None:
     op.drop_table('scan_logs')
     op.drop_table('properties')
     op.drop_table('alerts')
+    # Dropping the table does not drop the enum type it referenced, so a
+    # downgrade-then-upgrade cycle failed with 'type "scrapestatus" already
+    # exists'. Caught by test_migration_collapse.py.
+    sa.Enum(name='scrapestatus').drop(op.get_bind(), checkfirst=True)
     # ### end Alembic commands ###

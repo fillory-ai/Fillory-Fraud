@@ -67,6 +67,19 @@ ALERT_COOLDOWN_HOURS = _num("ALERT_COOLDOWN_HOURS", 24)
 # rather than sent — a scraper malfunction must never turn into 200 texts.
 MAX_ALERTS_PER_DAY = int(_num("MAX_ALERTS_PER_DAY", 10))
 
+# ── Delisting guard (M1) ────────────────────────────────────────────────────
+# A listing missing from one scan is usually pagination noise, not a takedown.
+# Two independent guards, because the failure mode — marking a live scam
+# "delisted" and dropping it out of monitoring — is silent.
+#   1. Coverage: skip delisting entirely if this scan returned materially fewer
+#      rows for a source than that source's recent average.
+#   2. Persistence: a listing must be missing from this many consecutive
+#      qualifying scans before it is marked delisted.
+DELIST_MIN_COVERAGE = _num("DELIST_MIN_COVERAGE", 0.6)
+DELIST_MISS_THRESHOLD = int(_num("DELIST_MISS_THRESHOLD", 2))
+# How many previous successful scans feed the coverage average.
+DELIST_COVERAGE_WINDOW = int(_num("DELIST_COVERAGE_WINDOW", 5))
+
 # ── Scheduler (M1) ──────────────────────────────────────────────────────────
 # Off by default: scans cost Apify credits, and an unattended local dev machine
 # should not spend them.

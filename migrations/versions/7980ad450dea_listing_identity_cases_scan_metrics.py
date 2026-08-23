@@ -65,58 +65,94 @@ def upgrade() -> None:
     )
 
     # ── Collapse duplicate sightings before the unique index goes on ──────
-    # Keep the earliest row per (source, external_id); carry the newest
-    # sighting time and the sighting count onto it; repoint child alerts;
-    # delete the rest. On the development database this is a no-op (measured:
-    # 191 rows, 0 duplicates) but it must exist for any environment that
-    # accumulated them, and the index below cannot be created without it.
+    # Keep the earliest row per (source, external_id) so the primary key that
+    # alerts already point at survives; then merge onto it, because the row we
+    # keep is the *stalest* one and deleting the later rows would otherwise
+    # throw away the most recent content and, worse, the most recent fraud
+    # verdict. On the development database this is a no-op (measured: 191 rows,
+    # 0 duplicates) but it must exist for any environment that accumulated
+    # them, and the index below cannot be created without it.
+    #
+    # Ordering is by COALESCE(scraped_at, created_at) — the same expression the
+    # backfill above used — with an id tiebreak, and every statement below uses
+    # an identical window so "keep_id" means the same thing throughout.
     op.execute(
         """
-        WITH ranked AS (
-            SELECT id, source, external_id, created_at,
-                   FIRST_VALUE(id) OVER w AS keep_id,
-                   COUNT(*)        OVER (PARTITION BY source, external_id) AS n
-            FROM scraped_listings
-            WHERE external_id IS NOT NULL
-            WINDOW w AS (PARTITION BY source, external_id ORDER BY created_at ASC)
-        ),
-        dupes AS (SELECT * FROM ranked WHERE n > 1),
-        agg AS (
-            SELECT keep_id, MAX(created_at) AS newest, COUNT(*) AS seen
-            FROM dupes GROUP BY keep_id
-        )
-        UPDATE scraped_listings l
-        SET last_seen_at = agg.newest,
-            times_seen   = agg.seen
-        FROM agg WHERE l.id = agg.keep_id
+        CREATE TEMP VIEW _dupe_ranked AS
+        SELECT id, source, external_id,
+               COALESCE(scraped_at, created_at) AS seen_at,
+               FIRST_VALUE(id) OVER w_asc  AS keep_id,
+               FIRST_VALUE(id) OVER w_desc AS newest_id,
+               FIRST_VALUE(id) OVER w_verdict AS verdict_id,
+               COUNT(*) OVER (PARTITION BY source, external_id) AS n
+        FROM scraped_listings
+        WHERE external_id IS NOT NULL
+        WINDOW
+            w_asc AS (PARTITION BY source, external_id
+                      ORDER BY COALESCE(scraped_at, created_at) ASC, id ASC),
+            w_desc AS (PARTITION BY source, external_id
+                       ORDER BY COALESCE(scraped_at, created_at) DESC, id DESC),
+            -- most recent row that actually carries a verdict; a later
+            -- re-scrape that came back "unknown" must not erase a "fraud".
+            w_verdict AS (PARTITION BY source, external_id
+                          ORDER BY (fraud_reason IS NOT NULL) DESC,
+                                   COALESCE(scraped_at, created_at) DESC, id DESC)
         """
     )
     op.execute(
         """
-        WITH ranked AS (
-            SELECT id, FIRST_VALUE(id) OVER (
-                       PARTITION BY source, external_id ORDER BY created_at ASC
-                   ) AS keep_id
-            FROM scraped_listings WHERE external_id IS NOT NULL
+        WITH agg AS (
+            SELECT keep_id,
+                   MIN(seen_at)    AS oldest,
+                   MAX(seen_at)    AS newest,
+                   COUNT(*)        AS seen,
+                   -- both are constant within a partition; array_agg because
+                   -- PostgreSQL has no MIN() for uuid.
+                   (array_agg(newest_id))[1]  AS newest_id,
+                   (array_agg(verdict_id))[1] AS verdict_id
+            FROM _dupe_ranked WHERE n > 1
+            GROUP BY keep_id
         )
+        UPDATE scraped_listings l
+        SET first_seen_at        = agg.oldest,
+            last_seen_at         = agg.newest,
+            times_seen           = agg.seen,
+            title                = nw.title,
+            price                = nw.price,
+            description          = nw.description,
+            location             = nw.location,
+            image_urls           = nw.image_urls,
+            url                  = nw.url,
+            street_address       = COALESCE(nw.street_address, l.street_address),
+            latitude             = COALESCE(nw.latitude, l.latitude),
+            longitude            = COALESCE(nw.longitude, l.longitude),
+            enriched             = (COALESCE(l.enriched, false) OR COALESCE(nw.enriched, false)),
+            fraud_status         = vd.fraud_status,
+            fraud_confidence     = vd.fraud_confidence,
+            fraud_reason         = vd.fraud_reason,
+            matched_property_id  = COALESCE(vd.matched_property_id, l.matched_property_id),
+            -- GREATEST ignores NULLs in PostgreSQL, so this is "whichever
+            -- sighting we actually alerted on".
+            alerted_at           = GREATEST(l.alerted_at, nw.alerted_at)
+        FROM agg
+        JOIN scraped_listings nw ON nw.id = agg.newest_id
+        JOIN scraped_listings vd ON vd.id = agg.verdict_id
+        WHERE l.id = agg.keep_id
+        """
+    )
+    op.execute(
+        """
         UPDATE alerts a
         SET listing_id = r.keep_id
-        FROM ranked r
+        FROM _dupe_ranked r
         WHERE a.listing_id = r.id AND r.id <> r.keep_id
         """
     )
     op.execute(
-        """
-        DELETE FROM scraped_listings WHERE id IN (
-            SELECT id FROM (
-                SELECT id, FIRST_VALUE(id) OVER (
-                           PARTITION BY source, external_id ORDER BY created_at ASC
-                       ) AS keep_id
-                FROM scraped_listings WHERE external_id IS NOT NULL
-            ) x WHERE id <> keep_id
-        )
-        """
+        "DELETE FROM scraped_listings WHERE id IN "
+        "(SELECT id FROM _dupe_ranked WHERE id <> keep_id)"
     )
+    op.execute("DROP VIEW _dupe_ranked")
 
     op.create_index('ix_listing_last_seen', 'scraped_listings', ['last_seen_at'], unique=False)
     op.create_index('uq_listing_source_external', 'scraped_listings', ['source', 'external_id'], unique=True, postgresql_where=sa.text('external_id IS NOT NULL'))

@@ -281,6 +281,24 @@ def create_app(static_dir: str) -> FastAPI:
     class CaseUpdate(BaseModel):
         status: str
 
+    def _case_payload(session, case):
+        """The shape the review queue renders.
+
+        Shared by GET and PUT deliberately: PUT used to return a bare
+        `case.to_dict()`, and the frontend swapping that into its list turned
+        a rich row into "Listing removed / —" the instant an operator
+        acknowledged a case.
+        """
+        listing = session.query(ScrapedListing).filter_by(id=case.listing_id).first()
+        prop = session.query(Property).filter_by(id=case.property_id).first()
+        alerts = session.query(Alert).filter_by(case_id=case.id).count()
+        return {
+            **case.to_dict(),
+            "alerts_recorded": alerts,
+            "listing": listing.to_dict() if listing else None,
+            "property_name": prop.name if prop else None,
+        }
+
     @api.get("/cases")
     def list_cases(status: str | None = None, limit: int = 100):
         """Cases, richest-first, with their listing and property inlined —
@@ -295,17 +313,7 @@ def create_app(static_dir: str) -> FastAPI:
                 raise HTTPException(status_code=400, detail=f"Unknown status '{status}'")
         cases = query.limit(limit).all()
 
-        result = []
-        for case in cases:
-            listing = session.query(ScrapedListing).filter_by(id=case.listing_id).first()
-            prop = session.query(Property).filter_by(id=case.property_id).first()
-            alerts = session.query(Alert).filter_by(case_id=case.id).count()
-            result.append({
-                **case.to_dict(),
-                "alerts_recorded": alerts,
-                "listing": listing.to_dict() if listing else None,
-                "property_name": prop.name if prop else None,
-            })
+        result = [_case_payload(session, case) for case in cases]
         session.close()
         return result
 
@@ -327,7 +335,7 @@ def create_app(static_dir: str) -> FastAPI:
             if new_status in (CaseStatus.RESOLVED, CaseStatus.DISMISSED):
                 case.resolved_at = datetime.now(timezone.utc)
             session.commit()
-            return case.to_dict()
+            return _case_payload(session, case)
         finally:
             session.close()
 

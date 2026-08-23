@@ -1,5 +1,6 @@
 """Database setup and session management."""
 import os
+from contextlib import contextmanager
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
@@ -36,11 +37,16 @@ def get_session():
         session.close()
 
 
+@contextmanager
 def db_session():
-    """Convenience context manager for sync endpoints."""
+    """Context manager yielding a session that is always closed.
+
+    The previous version `return`ed from inside a `try` whose `finally` closed
+    the session, so callers received an already-closed handle.
+    """
     session = SessionLocal()
     try:
-        return session
+        yield session
     finally:
         session.close()
 

@@ -37,6 +37,10 @@ export interface ScrapedListingData {
   latitude: number | null;
   longitude: number | null;
   enriched: boolean;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+  times_seen: number | null;
+  delisted_at: string | null;
   fraud_status: "fraud" | "legitimate" | "unknown";
   fraud_confidence: number | null;
   fraud_reason: string | null;
@@ -76,7 +80,12 @@ export interface AlertData {
 export interface ScanLogData {
   id: string;
   source: string;
+  trigger: string | null;
   listings_found: number;
+  listings_new: number | null;
+  listings_updated: number | null;
+  cases_opened: number | null;
+  enrichment_rate: number | null;
   fraud_found: number;
   alerts_sent: number;
   status: string;
@@ -85,11 +94,64 @@ export interface ScanLogData {
   completed_at: string | null;
 }
 
+export interface ScanHealthData {
+  healthy: boolean;
+  reason: string;
+  last_success_at: string | null;
+  last_scan_status: string | null;
+  hours_since_success: number | null;
+  stale_after_hours: number;
+  enrichment_rate: number | null;
+}
+
+export interface SchedulerJobData {
+  id: string;
+  next_run_at: string | null;
+}
+
+export interface SchedulerData {
+  enabled: boolean;
+  running: boolean;
+  interval_hours: number;
+  jitter_minutes: number;
+  jobs: SchedulerJobData[];
+  last_health_check: (ScanHealthData & { checked_at: string }) | null;
+}
+
+export interface ScanHealthResponse extends ScanHealthData {
+  scheduler: SchedulerData;
+}
+
+export type CaseStatus = "open" | "acknowledged" | "filed" | "resolved" | "dismissed" | "disputed";
+
+export interface CaseData {
+  id: string;
+  listing_id: string;
+  property_id: string | null;
+  status: CaseStatus;
+  confidence: number | null;
+  reason: string | null;
+  match_signal: string | null;
+  opened_at: string;
+  updated_at: string;
+  last_alert_at: string | null;
+  alert_count: number;
+  // Newline-separated free text appended by the pipeline, not structured events.
+  change_log: string | null;
+  resolved_at: string | null;
+  alerts_recorded: number;
+  listing: ScrapedListingData | null;
+  property_name: string | null;
+}
+
 export interface StatsData {
   total_properties: number;
   total_listings_scraped: number;
   fraud_detected: number;
   alerts_sent: number;
+  open_cases: number;
+  observe_mode: boolean;
+  scan_health: ScanHealthData | null;
   last_scan: ScanLogData | null;
 }
 
@@ -101,4 +163,7 @@ export interface ConfigStatusData {
   scrape_city: string;
   scrape_state: string;
   alert_phone: string;
+  observe_mode: boolean;
+  scheduler_enabled: boolean;
+  scan_interval_hours: number;
 }

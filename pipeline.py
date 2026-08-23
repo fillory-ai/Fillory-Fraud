@@ -10,13 +10,16 @@ when a human clicked "Scan" once an hour and fatal the moment scanning became
 automatic.
 """
 import hashlib
+import json
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func
+from sqlalchemy import func, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 
-from database import SessionLocal
+from database import db_session
 from models import (
     Property,
     ScrapedListing,
@@ -38,6 +41,9 @@ from config import (
     OBSERVE_MODE,
     ALERT_COOLDOWN_HOURS,
     MAX_ALERTS_PER_DAY,
+    DELIST_MIN_COVERAGE,
+    DELIST_MISS_THRESHOLD,
+    DELIST_COVERAGE_WINDOW,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,6 +77,52 @@ def content_fingerprint(listing_data: dict) -> str:
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
+def _claim_listing(session, listing_data: dict, fingerprint: str, now) -> uuid.UUID | None:
+    """Try to insert a new listing row, returning its id, or None on conflict.
+
+    Separated out and driven by INSERT ... ON CONFLICT DO NOTHING rather than
+    trusting a preceding SELECT: a scheduled scan and a manual scan can overlap
+    on the same posting, and losing that race used to raise IntegrityError
+    partway through a scan.
+    """
+    stmt = (
+        pg_insert(ScrapedListing.__table__)
+        .values(
+            id=uuid.uuid4(),
+            source=listing_data["source"],
+            external_id=listing_data.get("external_id"),
+            title=listing_data.get("title", "Untitled"),
+            price=listing_data.get("price"),
+            location=listing_data.get("location"),
+            description=listing_data.get("description"),
+            url=listing_data.get("url", ""),
+            image_urls=listing_data.get("image_urls"),
+            street_address=listing_data.get("street_address"),
+            latitude=listing_data.get("latitude"),
+            longitude=listing_data.get("longitude"),
+            enriched=bool(listing_data.get("enriched")),
+            fraud_status=ScrapeStatus.UNKNOWN,
+            content_fingerprint=fingerprint,
+            first_seen_at=now,
+            last_seen_at=now,
+            times_seen=1,
+            consecutive_misses=0,
+            created_at=now,
+            scraped_at=now,
+        )
+        .on_conflict_do_nothing(
+            index_elements=["source", "external_id"],
+            # The unique index is partial; Postgres can only infer it as the
+            # conflict arbiter if the predicate is restated here.
+            index_where=text("external_id IS NOT NULL"),
+        )
+        .returning(ScrapedListing.__table__.c.id)
+    )
+    inserted = session.execute(stmt).scalar()
+    session.commit()
+    return inserted
+
+
 def _upsert_listing(session, listing_data: dict) -> tuple[uuid.UUID, bool, bool]:
     """Insert a listing, or update the existing row for the same posting.
 
@@ -78,6 +130,10 @@ def _upsert_listing(session, listing_data: dict) -> tuple[uuid.UUID, bool, bool]
 
     Identity is (source, external_id). Listings without an external_id —
     manual pastes — are always inserted, since there is nothing to match on.
+
+    The insert races the unique index rather than trusting the preceding
+    SELECT: a scheduled scan and a manual scan can overlap, and losing that
+    race used to raise IntegrityError mid-scan.
     """
     fingerprint = content_fingerprint(listing_data)
     external_id = listing_data.get("external_id")
@@ -91,12 +147,26 @@ def _upsert_listing(session, listing_data: dict) -> tuple[uuid.UUID, bool, bool]
             .first()
         )
 
+    if existing is None and external_id:
+        inserted = _claim_listing(session, listing_data, fingerprint, now)
+        if inserted is not None:
+            return inserted, True, True
+        # Lost the race: another worker inserted it between our SELECT and our
+        # INSERT. Fall through to the update path.
+        existing = (
+            session.query(ScrapedListing)
+            .filter_by(source=listing_data["source"], external_id=external_id)
+            .first()
+        )
+
     if existing is not None:
         changed = existing.content_fingerprint != fingerprint
         existing.last_seen_at = now
         existing.times_seen = (existing.times_seen or 1) + 1
-        # A listing we see again is not delisted, even if we thought it was.
+        # A listing we see again is not delisted, even if we thought it was,
+        # and its miss streak restarts.
         existing.delisted_at = None
+        existing.consecutive_misses = 0
         if changed:
             existing.title = listing_data.get("title", existing.title)
             existing.price = listing_data.get("price")
@@ -113,9 +183,10 @@ def _upsert_listing(session, listing_data: dict) -> tuple[uuid.UUID, bool, bool]
         session.commit()
         return existing.id, False, changed
 
+    # No external_id: a manual paste. Nothing to collide with.
     listing = ScrapedListing(
         source=listing_data["source"],
-        external_id=external_id,
+        external_id=None,
         title=listing_data.get("title", "Untitled"),
         price=listing_data.get("price"),
         location=listing_data.get("location"),
@@ -139,11 +210,21 @@ def _upsert_listing(session, listing_data: dict) -> tuple[uuid.UUID, bool, bool]
 
 # ── Alert policy ────────────────────────────────────────────────────────────
 
+# An alert that consumed the day's budget, whether or not a text left the
+# building. Observe mode has to count, otherwise the volume you watch in
+# observe mode is not the volume you would get live — which is the only
+# question observe mode exists to answer.
+BUDGETED_ALERT_STATUSES = ("sent", "observed")
+# Statuses that start the per-case cooldown clock. A genuine send *failure*
+# deliberately does not, so the next material change retries.
+COOLDOWN_STATUSES = ("sent", "observed", "suppressed_rate_limit")
+
+
 def _alerts_in_last_day(session) -> int:
     cutoff = _now() - timedelta(hours=24)
     return (
         session.query(func.count(Alert.id))
-        .filter(Alert.created_at >= cutoff, Alert.status == "sent")
+        .filter(Alert.created_at >= cutoff, Alert.status.in_(BUDGETED_ALERT_STATUSES))
         .scalar()
         or 0
     )
@@ -155,20 +236,29 @@ def _record_alert(session, case: Case, listing_data: dict, listing_id, property_
     Every decision produces an Alert row. A suppressed alert that leaves no
     trace is indistinguishable from a detection failure when someone later asks
     "why didn't I hear about this one?".
+
+    The rate cap is evaluated *before* the observe-mode branch so both modes
+    make the same decisions in the same order.
     """
     now = _now()
 
-    if OBSERVE_MODE:
-        status, error = "observed", "Observe mode: recorded, not sent."
-    elif _alerts_in_last_day(session) >= MAX_ALERTS_PER_DAY:
+    if _alerts_in_last_day(session) >= MAX_ALERTS_PER_DAY:
         status, error = "suppressed_rate_limit", (
             f"Daily cap of {MAX_ALERTS_PER_DAY} alerts reached. "
             "Case is open and visible in the dashboard."
         )
+    elif OBSERVE_MODE:
+        status, error = "observed", "Observe mode: recorded, not sent."
     else:
-        outcome = send_fraud_alert(listing_data, property_name)
-        status = outcome.get("status", "failed")
-        error = outcome.get("error_message")
+        # A notifier blowing up must not abort the scan or leave a case open
+        # with no audit trail; it is recorded as a failed alert like any other.
+        try:
+            outcome = send_fraud_alert(listing_data, property_name)
+            status = outcome.get("status", "failed")
+            error = outcome.get("error_message")
+        except Exception as e:
+            logger.exception("Notifier raised for case %s", case.id)
+            status, error = "failed", f"Notifier error: {e}"
 
     alert = Alert(
         listing_id=listing_id,
@@ -186,8 +276,9 @@ def _record_alert(session, case: Case, listing_data: dict, listing_id, property_
     )
     session.add(alert)
 
-    if status == "sent":
+    if status in COOLDOWN_STATUSES:
         case.last_alert_at = now
+    if status in BUDGETED_ALERT_STATUSES:
         case.alert_count = (case.alert_count or 0) + 1
     session.commit()
 
@@ -219,8 +310,25 @@ def _open_or_update_case(
             match_signal=result.get("match_signal"),
         )
         session.add(case)
-        session.commit()
-        return case, "opened"
+        try:
+            # flush, not commit: the case and the alert row that follows it are
+            # one unit of work. A case visible with no alert record is exactly
+            # the "why didn't I hear about this?" gap the audit trail exists to
+            # close.
+            session.flush()
+            return case, "opened"
+        except IntegrityError:
+            # Another worker opened the same case between our SELECT and our
+            # INSERT. Theirs is as good as ours; adopt it and fall through to
+            # the update path rather than crashing the scan.
+            session.rollback()
+            case = (
+                session.query(Case)
+                .filter_by(listing_id=listing_id, property_id=property_id)
+                .first()
+            )
+            if case is None:
+                raise
 
     case.confidence = result.get("confidence")
     case.reason = result.get("reason")
@@ -228,11 +336,11 @@ def _open_or_update_case(
 
     # A case the user has already dealt with never re-alerts.
     if case.status in (CaseStatus.DISMISSED, CaseStatus.RESOLVED, CaseStatus.DISPUTED):
-        session.commit()
+        session.flush()
         return case, "quiet"
 
     if not content_changed:
-        session.commit()
+        session.flush()
         return case, "quiet"
 
     entry = f"{_now().isoformat()} listing content changed"
@@ -242,7 +350,7 @@ def _open_or_update_case(
         case.last_alert_at is None
         or (_now() - case.last_alert_at) >= timedelta(hours=ALERT_COOLDOWN_HOURS)
     )
-    session.commit()
+    session.flush()
     return case, ("changed" if cooled else "quiet")
 
 
@@ -250,8 +358,7 @@ def _open_or_update_case(
 
 async def process_listing(listing_data: dict, property_dicts: list[dict]) -> dict:
     """Store/refresh one listing, analyse it if needed, and manage its case."""
-    session = SessionLocal()
-    try:
+    with db_session() as session:
         listing_id, is_new, content_changed = _upsert_listing(session, listing_data)
 
         # Nothing about this listing changed and we already have a verdict:
@@ -271,8 +378,6 @@ async def process_listing(listing_data: dict, property_dicts: list[dict]) -> dic
                     "alert_status": None,
                     "alert_sent": False,
                 }
-    finally:
-        session.close()
 
     try:
         result = await analyze_listing_ai(listing_data, property_dicts)
@@ -286,11 +391,10 @@ async def process_listing(listing_data: dict, property_dicts: list[dict]) -> dic
             "match_signal": None,
         }
 
-    session = SessionLocal()
     case_action = "none"
     alert_status = None
     alert_sent = False
-    try:
+    with db_session() as session:
         db_listing = session.query(ScrapedListing).filter_by(id=listing_id).first()
         if db_listing:
             db_listing.fraud_status = ScrapeStatus(result["fraud_status"])
@@ -328,8 +432,10 @@ async def process_listing(listing_data: dict, property_dicts: list[dict]) -> dic
                     if db_listing:
                         db_listing.alerted_at = _now()
                         session.commit()
-    finally:
-        session.close()
+            else:
+                # No alert followed, so nothing has committed the case
+                # bookkeeping that _open_or_update_case only flushed.
+                session.commit()
 
     return {
         "listing_id": str(listing_id),
@@ -348,18 +454,76 @@ async def process_listing(listing_data: dict, property_dicts: list[dict]) -> dic
 
 # ── Delisting ───────────────────────────────────────────────────────────────
 
-def _mark_delisted(session, source: str, seen_external_ids: set[str], scan_started) -> int:
-    """Flag listings that a successful scan of this source no longer returns.
+def _recent_source_average(session, source: str, exclude_scan_id=None) -> float | None:
+    """Mean row count this source returned over recent completed scans.
+
+    Returns None when there is no history to compare against — in which case
+    the caller declines to delist rather than guessing.
+    """
+    rows = (
+        session.query(ScanLog.source_counts)
+        .filter(ScanLog.status == "completed", ScanLog.source_counts.isnot(None))
+        .order_by(ScanLog.started_at.desc())
+        .limit(DELIST_COVERAGE_WINDOW + 1)
+        .all()
+    )
+    counts = []
+    for (raw,) in rows:
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if source in parsed:
+            counts.append(parsed[source])
+    counts = counts[:DELIST_COVERAGE_WINDOW]
+    if not counts:
+        return None
+    return sum(counts) / len(counts)
+
+
+def _mark_delisted(
+    session,
+    source: str,
+    seen_external_ids: set[str],
+    scan_started,
+    row_count: int | None = None,
+) -> int:
+    """Flag listings that repeated complete scans of this source no longer return.
+
+    Two guards, because marking a live scam "delisted" removes it from
+    monitoring silently:
+
+    1. *Coverage* — if this scan returned materially fewer rows than this
+       source's recent average, the scrape was probably truncated (Apify
+       returning 20 rows instead of 50 with no exception is a real failure
+       mode), so nothing is delisted at all.
+    2. *Persistence* — a listing missing from a qualifying scan increments a
+       miss counter; only once it crosses DELIST_MISS_THRESHOLD consecutive
+       misses is it actually marked delisted. Any re-sighting resets it.
 
     Only applied to listings we saw within the last 7 days: older ones fell out
     of the scraper's result window long ago and their absence means nothing.
-    Guarded by the caller so this never runs after a failed scrape — otherwise
-    a scraper outage would look like the entire market being taken down.
+    Guarded by the caller so this never runs after a failed scrape.
     """
     if not seen_external_ids:
         return 0
+
+    if row_count is None:
+        row_count = len(seen_external_ids)
+    average = _recent_source_average(session, source)
+    if average is None:
+        logger.info("Delisting skipped for %s: no scan history to compare against", source)
+        return 0
+    if average > 0 and row_count < DELIST_MIN_COVERAGE * average:
+        logger.warning(
+            "Delisting skipped for %s: %s rows is below %.0f%% of the recent average %.1f "
+            "— treating this as a truncated scrape, not an emptied market",
+            source, row_count, DELIST_MIN_COVERAGE * 100, average,
+        )
+        return 0
+
     cutoff = _now() - timedelta(days=7)
-    stale = (
+    missing = (
         session.query(ScrapedListing)
         .filter(
             ScrapedListing.source == source,
@@ -371,11 +535,15 @@ def _mark_delisted(session, source: str, seen_external_ids: set[str], scan_start
         )
         .all()
     )
-    for listing in stale:
-        listing.delisted_at = _now()
-    if stale:
+    newly_delisted = 0
+    for listing in missing:
+        listing.consecutive_misses = (listing.consecutive_misses or 0) + 1
+        if listing.consecutive_misses >= DELIST_MISS_THRESHOLD:
+            listing.delisted_at = _now()
+            newly_delisted += 1
+    if missing:
         session.commit()
-    return len(stale)
+    return newly_delisted
 
 
 # ── Full scan ───────────────────────────────────────────────────────────────
@@ -386,12 +554,11 @@ async def run_scan(source: str | None = None, trigger: str = "manual") -> dict:
     state = SCRAPE_STATE
     scan_started = _now()
 
-    session = SessionLocal()
-    scan_log = ScanLog(source=source or "all", status="running", trigger=trigger)
-    session.add(scan_log)
-    session.commit()
-    scan_id = scan_log.id
-    session.close()
+    with db_session() as session:
+        scan_log = ScanLog(source=source or "all", status="running", trigger=trigger)
+        session.add(scan_log)
+        session.commit()
+        scan_id = scan_log.id
 
     all_listings: list[dict] = []
     per_source: dict[str, list[dict]] = {}
@@ -435,9 +602,8 @@ async def run_scan(source: str | None = None, trigger: str = "manual") -> dict:
     except Exception:
         logger.exception("Property geocoding error (continuing without geo match)")
 
-    session = SessionLocal()
-    property_dicts = [p.to_dict() for p in session.query(Property).all()]
-    session.close()
+    with db_session() as session:
+        property_dicts = [p.to_dict() for p in session.query(Property).all()]
 
     new_count = updated_count = fraud_count = alert_count = cases_opened = 0
 
@@ -454,38 +620,38 @@ async def run_scan(source: str | None = None, trigger: str = "manual") -> dict:
         if result["alert_sent"]:
             alert_count += 1
 
-    # Delisting is only meaningful when the scrape itself succeeded.
+    # Delisting is only meaningful when the scrape itself succeeded, and the
+    # coverage guard inside _mark_delisted needs the raw row count — a source
+    # can return rows with no external_id, and those must not inflate coverage.
     delisted = 0
-    session = SessionLocal()
-    try:
+    with db_session() as session:
         for src, listings in per_source.items():
             if not source_ok.get(src):
                 continue
             seen = {l.get("external_id") for l in listings if l.get("external_id")}
-            delisted += _mark_delisted(session, src, seen, scan_started)
-    finally:
-        session.close()
+            delisted += _mark_delisted(session, src, seen, scan_started, row_count=len(listings))
 
     # A scan where every requested source failed is a failure, not an empty
     # market. Recording it as "completed" would hide an outage.
     all_failed = bool(source_ok) and not any(source_ok.values())
     status = "failed" if all_failed else "completed"
 
-    session = SessionLocal()
-    scan = session.query(ScanLog).filter_by(id=scan_id).first()
-    if scan:
-        scan.listings_found = len(all_listings)
-        scan.listings_new = new_count
-        scan.listings_updated = updated_count
-        scan.cases_opened = cases_opened
-        scan.enrichment_rate = enrichment_rate
-        scan.fraud_found = fraud_count
-        scan.alerts_sent = alert_count
-        scan.status = status
-        scan.error_message = "; ".join(errors) if errors else None
-        scan.completed_at = _now()
-        session.commit()
-    session.close()
+    with db_session() as session:
+        scan = session.query(ScanLog).filter_by(id=scan_id).first()
+        if scan:
+            scan.listings_found = len(all_listings)
+            scan.listings_new = new_count
+            scan.listings_updated = updated_count
+            scan.cases_opened = cases_opened
+            scan.enrichment_rate = enrichment_rate
+            # Feeds the next scan's delisting coverage guard.
+            scan.source_counts = json.dumps({s: len(v) for s, v in per_source.items()})
+            scan.fraud_found = fraud_count
+            scan.alerts_sent = alert_count
+            scan.status = status
+            scan.error_message = "; ".join(errors) if errors else None
+            scan.completed_at = _now()
+            session.commit()
 
     return {
         "scan_id": str(scan_id),

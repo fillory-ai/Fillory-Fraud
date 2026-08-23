@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, CheckCircle, ExternalLink, HelpCircle, MapPin } from "lucide-react";
+import { AlertTriangle, CheckCircle, ExternalLink, Eye, HelpCircle, MapPin } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
@@ -98,7 +98,26 @@ export function ListingDetailDialog({ listing, properties, onOpenChange }: Listi
               <Field label="Street address" value={shown.street_address || "— (not published by source)"} />
               <Field label="Location" value={shown.location || "—"} />
               <Field label="Posted" value={formatDate(shown.posted_date)} />
+              <Field label="First seen" value={formatDate(shown.first_seen_at)} />
+              <Field label="Last seen" value={formatDate(shown.last_seen_at)} />
             </div>
+
+            {shown.times_seen != null && shown.times_seen > 1 && (
+              <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                <Eye className="h-4 w-4" />
+                Seen {shown.times_seen} times across scans
+              </div>
+            )}
+
+            {shown.delisted_at && (
+              <div className="flex items-center gap-2">
+                <Badge variant="outline" className="gap-1 border-green-500/20 bg-green-500/10 text-green-600">
+                  <CheckCircle className="h-3 w-3" />
+                  Delisted {formatDate(shown.delisted_at)}
+                </Badge>
+                <span className="text-xs text-muted-foreground">No longer appearing in marketplace scans.</span>
+              </div>
+            )}
 
             {shown.latitude != null && shown.longitude != null && (
               <a

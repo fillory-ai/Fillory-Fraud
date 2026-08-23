@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Activity, AlertTriangle, Bell, CheckCircle, Clock, Home, Search, Settings, XCircle } from "lucide-react";
+import { Activity, AlertTriangle, CheckCircle, Clock, EyeOff, FolderCheck, Home, Search, Settings, XCircle } from "lucide-react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ListingDetailDialog } from "@/components/ListingDetailDialog";
 import { cn } from "@/lib/utils";
@@ -12,18 +13,40 @@ const formatDate = (value: string | null | undefined) => value ? new Intl.DateTi
 export function DashboardTab({ stats, config, listings, properties, loading }: DashboardTabProps) {
   const [selected, setSelected] = useState<ScrapedListingData | null>(null);
   const flagged = listings.filter(l => l.fraud_status === "fraud");
+  const health = stats?.scan_health;
+  const showHealthBanner = health && !health.healthy;
   const metrics = [
     { label: "Properties", value: stats?.total_properties, icon: Home },
     { label: "Listings Scraped", value: stats?.total_listings_scraped, icon: Search },
     { label: "Fraud Detected", value: stats?.fraud_detected, icon: AlertTriangle },
-    { label: "Alerts Sent", value: stats?.alerts_sent, icon: Bell },
+    { label: "Open Cases", value: stats?.open_cases, icon: FolderCheck },
   ];
   const services = [
     ["Apify", config?.apify_configured, true], ["Twilio", config?.twilio_configured, config?.twilio_enabled], ["Gemini", config?.gemini_configured, true],
   ] as const;
   return (
     <div className="space-y-6">
-      <div><h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1><p className="mt-1 text-sm text-muted-foreground">A real-time overview of your rental protection.</p></div>
+      <div className="flex items-center justify-between">
+        <div><h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1><p className="mt-1 text-sm text-muted-foreground">A real-time overview of your rental protection.</p></div>
+        {config?.observe_mode && (
+          <div className="flex items-center gap-1.5 rounded-md border border-blue-500/20 bg-blue-500/5 px-3 py-1.5 text-xs text-blue-600">
+            <EyeOff className="h-3.5 w-3.5" />
+            Observe mode — alerts recorded, not sent
+          </div>
+        )}
+      </div>
+      {/* A stale scanner means we are blind to the market, not that fraud is absent.
+          The wording makes this distinction explicit so users don't read "0 fraud" as safe. */}
+      {showHealthBanner && (
+        <Alert variant="destructive">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertTitle>Scanner is not current</AlertTitle>
+          <AlertDescription>
+            Last successful scan was {health.hours_since_success != null ? `${Math.round(health.hours_since_success)}h` : "an unknown time"} ago.
+            A "0 fraud" count may just mean the market is not being seen — not that no fraud exists.
+          </AlertDescription>
+        </Alert>
+      )}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {metrics.map(({ label, value, icon: Icon }) => <Card key={label} className="shadow-sm"><CardContent className="flex items-start justify-between p-5"><div><p className="text-sm text-muted-foreground">{label}</p><p className="mt-2 text-3xl font-semibold tracking-tight">{loading ? "—" : (value ?? 0).toLocaleString()}</p></div><div className="rounded-lg bg-muted p-2.5"><Icon className="h-5 w-5" /></div></CardContent></Card>)}
       </div>
