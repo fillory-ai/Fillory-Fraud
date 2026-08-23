@@ -9,11 +9,15 @@ if not DATABASE_URL:
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_size=5)
 
+# Overridable so tooling can point at a scratch schema (used when generating a
+# baseline migration against an empty schema). Production never sets this.
+SEARCH_PATH = os.environ.get("DB_SEARCH_PATH", "public, neon_auth")
+
 @event.listens_for(engine, "connect")
 def set_search_path(dbapi_connection, connection_record):
     """Ensure the public schema is in the search path."""
     cursor = dbapi_connection.cursor()
-    cursor.execute("SET search_path TO public, neon_auth")
+    cursor.execute(f"SET search_path TO {SEARCH_PATH}")
     cursor.close()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -42,27 +46,24 @@ def db_session():
 
 
 def init_db():
-    """Create all tables if they don't exist."""
-    Base.metadata.create_all(bind=engine)
-    _run_migrations()
+    """Bring the database up to the latest Alembic revision.
 
+    Replaces the old `create_all()` + hand-written `ALTER TABLE ... IF NOT
+    EXISTS` list. That approach could only ever add nullable columns: it could
+    not express a constraint, an index, a data backfill, or a rollback — all of
+    which M1's de-duplication work needs.
 
-# Additive, idempotent column migrations. SQLAlchemy's create_all() will not
-# alter existing tables, so new columns are added explicitly here.
-_MIGRATIONS = (
-    "ALTER TABLE properties ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION",
-    "ALTER TABLE properties ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION",
-    "ALTER TABLE properties ADD COLUMN IF NOT EXISTS geocoded_at TIMESTAMPTZ",
-    "ALTER TABLE properties ADD COLUMN IF NOT EXISTS zip_plus4 VARCHAR(12)",
-    "ALTER TABLE scraped_listings ADD COLUMN IF NOT EXISTS street_address VARCHAR(300)",
-    "ALTER TABLE scraped_listings ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION",
-    "ALTER TABLE scraped_listings ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION",
-    "ALTER TABLE scraped_listings ADD COLUMN IF NOT EXISTS enriched BOOLEAN DEFAULT FALSE",
-)
+    A fresh database gets the baseline revision (which creates every table) and
+    then every revision after it, so there is exactly one code path for new and
+    existing deployments.
+    """
+    from alembic import command
+    from alembic.config import Config
 
-
-def _run_migrations():
-    from sqlalchemy import text
-    with engine.begin() as conn:
-        for statement in _MIGRATIONS:
-            conn.execute(text(statement))
+    ini_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "alembic.ini")
+    cfg = Config(ini_path)
+    cfg.set_main_option(
+        "script_location",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "migrations"),
+    )
+    command.upgrade(cfg, "head")

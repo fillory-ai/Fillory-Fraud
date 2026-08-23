@@ -17,6 +17,8 @@ dependencies = [
     "psycopg2-binary>=2.9.12",
     "langchain-google-genai>=4.3.2",
     "keyring>=25.7.0",
+    "alembic>=1.19.1",
+    "apscheduler>=3.11.3",
 ]
 
 [tool.uv]
