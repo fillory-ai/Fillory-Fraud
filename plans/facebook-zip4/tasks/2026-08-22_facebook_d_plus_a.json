@@ -27,6 +27,6 @@
   {
     "content": "Re-run against real FB rows; verify roommate false match is gone; commit+push",
     "id": "6",
-    "status": "pending"
+    "status": "completed"
   }
 ]
