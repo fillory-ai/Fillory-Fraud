@@ -1,0 +1,27 @@
+[
+  {
+    "content": "[imp-1] detector.py: Gemini text parser for pasted listings",
+    "id": "imp-1",
+    "status": "completed"
+  },
+  {
+    "content": "[imp-2] routes.py: shared listing pipeline + POST /listings/import",
+    "id": "imp-2",
+    "status": "completed"
+  },
+  {
+    "content": "[imp-3] Frontend: ImportTab + tab wiring",
+    "id": "imp-3",
+    "status": "completed"
+  },
+  {
+    "content": "[imp-4] Rename app to fillory fraud detector",
+    "id": "imp-4",
+    "status": "completed"
+  },
+  {
+    "content": "[imp-5] E2E test paste-import via API",
+    "id": "imp-5",
+    "status": "completed"
+  }
+]

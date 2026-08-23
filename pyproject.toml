@@ -1,0 +1,25 @@
+[project]
+name = "rental-fraud-detector"
+version = "0.1.0"
+description = "Watches Craigslist and Facebook Marketplace for fraudulent rental listings and sends SMS alerts."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi==0.135.1",
+    "uvicorn==0.41.0",
+    "httpx==0.28.1",
+    "python-multipart==0.0.22",
+    "watchfiles==1.1.1",
+    "sqlalchemy>=2.0.51",
+    "apify-client>=3.1.1",
+    "twilio>=9.10.9",
+    "google-genai>=2.17.0",
+    "psycopg2-binary>=2.9.12",
+    "langchain-google-genai>=4.3.2",
+    "keyring>=25.7.0",
+]
+
+[tool.uv]
+exclude-newer = "14 days"
+# workshop-connect is published by us; exempt from the rolling window.
+exclude-newer-package = { workshop-connect = "2027-01-01" }

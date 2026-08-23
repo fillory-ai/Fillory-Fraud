@@ -1,0 +1,11 @@
+import { Bell, CheckCircle, XCircle } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent } from "@/components/ui/card";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { cn } from "@/lib/utils";
+import type { AlertData } from "@/types";
+
+const date = (v: string | null) => v ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(v)) : "—";
+export function AlertsTab({ alerts }: { alerts: AlertData[] }) {
+  return <div className="space-y-6"><div><h1 className="text-2xl font-semibold tracking-tight">Alerts</h1><p className="mt-1 text-sm text-muted-foreground">Delivery history for fraud notifications.</p></div><Card className="overflow-hidden shadow-sm"><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Type</TableHead><TableHead>Recipient</TableHead><TableHead className="min-w-[300px]">Message</TableHead><TableHead>Status</TableHead><TableHead>Sent</TableHead><TableHead>Created</TableHead></TableRow></TableHeader><TableBody>{alerts.map(alert => { const sent = alert.status.toLowerCase() === "sent"; return <TableRow key={alert.id}><TableCell className="font-medium capitalize">{alert.alert_type.replaceAll("_", " ")}</TableCell><TableCell>{alert.recipient}</TableCell><TableCell className="max-w-[420px] whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">{alert.message}{alert.error_message && <span className="mt-1 block text-amber-600">{alert.error_message}</span>}</TableCell><TableCell><Badge variant="outline" className={cn("gap-1 capitalize", sent ? "border-green-500/20 bg-green-500/10 text-green-600" : "border-red-500/20 bg-red-500/10 text-red-500")}>{sent ? <CheckCircle className="h-3 w-3" /> : <XCircle className="h-3 w-3" />}{alert.status}</Badge></TableCell><TableCell className="text-muted-foreground">{date(alert.sent_at)}</TableCell><TableCell className="text-muted-foreground">{date(alert.created_at)}</TableCell></TableRow>; })}</TableBody></Table></div>{alerts.length === 0 && <div className="flex flex-col items-center gap-2 p-12 text-sm text-muted-foreground"><Bell className="h-7 w-7" />No alerts have been sent.</div>}</CardContent></Card></div>;
+}

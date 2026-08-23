@@ -1,0 +1,32 @@
+[
+  {
+    "content": "[DB] Create database tables by running init_db in routes.py",
+    "id": "db-init",
+    "status": "completed"
+  },
+  {
+    "content": "[SCRAPER] Build Apify scraper for Craigslist + Facebook Marketplace",
+    "id": "scraper",
+    "status": "completed"
+  },
+  {
+    "content": "[AI] Build Gemini fraud detector that compares listings vs properties",
+    "id": "ai-detector",
+    "status": "completed"
+  },
+  {
+    "content": "[SMS] Build Twilio SMS notifier service",
+    "id": "sms",
+    "status": "completed"
+  },
+  {
+    "content": "[BACKEND] Update routes.py with all API endpoints + scanner scheduler",
+    "id": "routes",
+    "status": "completed"
+  },
+  {
+    "content": "[FRONTEND] Build React UI for property management, scan results, alerts",
+    "id": "frontend",
+    "status": "in_progress"
+  }
+]

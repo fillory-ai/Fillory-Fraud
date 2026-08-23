@@ -1,0 +1,8 @@
+{
+  "techStack": "DATA_APP_REACT_PYTHON",
+  "enabledPlugins": {
+    "data-app-react-python@workshop-plugins": true,
+    "connectors-python@workshop-plugins": true,
+    "frontend-design@workshop-plugins": true
+  }
+}

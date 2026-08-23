@@ -1,0 +1,32 @@
+[
+  {
+    "content": "[L1-1] Add lat/long + street_address columns to ScrapedListing and Property",
+    "id": "1",
+    "status": "completed"
+  },
+  {
+    "content": "[L1-2] Build Craigslist detail-page enricher in scraper.py",
+    "id": "2",
+    "status": "completed"
+  },
+  {
+    "content": "[L2-1] Geocode registered properties (Nominatim, cached in DB)",
+    "id": "3",
+    "status": "completed"
+  },
+  {
+    "content": "[L2-2] Add geo-radius matcher to detector.py alongside text match",
+    "id": "4",
+    "status": "completed"
+  },
+  {
+    "content": "[L1-3] Wire enrichment into run_scan pipeline",
+    "id": "5",
+    "status": "completed"
+  },
+  {
+    "content": "[L1-4] Live scan test + verify address coverage improvement",
+    "id": "6",
+    "status": "completed"
+  }
+]

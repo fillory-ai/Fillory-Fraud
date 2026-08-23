@@ -1,0 +1,19 @@
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+*.egg-info/
+
+# Secrets — this project reads credentials from the macOS keychain and the
+# Workshop connector environment. Nothing secret should ever be committed.
+.env
+.env.*
+*.pem
+*.key
+secrets.json
+
+# Local scratch
+.vite/
+*.log

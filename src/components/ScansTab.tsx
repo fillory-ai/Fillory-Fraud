@@ -1,0 +1,18 @@
+import { AlertTriangle, CheckCircle, RefreshCw, ScanLine, XCircle } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { cn } from "@/lib/utils";
+import type { ScanLogData } from "@/types";
+
+interface ScansTabProps { scans: ScanLogData[]; source: string; onSourceChange: (value: string) => void; onRunScan: () => void; scanning: boolean; }
+const date = (v: string | null) => v ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(v)) : "—";
+export function ScansTab({ scans, source, onSourceChange, onRunScan, scanning }: ScansTabProps) {
+  return <div className="space-y-6"><div><h1 className="text-2xl font-semibold tracking-tight">Scans</h1><p className="mt-1 text-sm text-muted-foreground">Search marketplaces for unauthorized rental listings.</p></div>
+    <Card className="shadow-sm"><CardHeader><CardTitle className="flex items-center gap-2 text-base"><ScanLine className="h-4 w-4" />Run a marketplace scan</CardTitle><CardDescription>Select a source and begin monitoring. This may take a few minutes.</CardDescription></CardHeader><CardContent className="flex flex-col gap-3 sm:flex-row"><Select value={source} onValueChange={onSourceChange}><SelectTrigger className="sm:w-[240px]"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All sources</SelectItem><SelectItem value="craigslist">Craigslist</SelectItem><SelectItem value="facebook_marketplace">Facebook Marketplace</SelectItem></SelectContent></Select><Button onClick={onRunScan} disabled={scanning} className="gap-2"><RefreshCw className={cn("h-4 w-4", scanning && "animate-spin")} />{scanning ? "Scanning…" : "Run Scan"}</Button></CardContent></Card>
+    <Card className="overflow-hidden shadow-sm"><CardHeader><CardTitle className="text-base">Scan history</CardTitle></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Source</TableHead><TableHead>Status</TableHead><TableHead>Listings</TableHead><TableHead>Fraud</TableHead><TableHead>Alerts</TableHead><TableHead>Started</TableHead><TableHead>Completed</TableHead></TableRow></TableHeader><TableBody>{scans.map(scan => <TableRow key={scan.id}><TableCell className="font-medium capitalize">{scan.source.replaceAll("_", " ")}</TableCell><TableCell><Status status={scan.status} /></TableCell><TableCell>{scan.listings_found}</TableCell><TableCell>{scan.fraud_found}</TableCell><TableCell>{scan.alerts_sent}</TableCell><TableCell className="text-muted-foreground">{date(scan.started_at)}</TableCell><TableCell className="text-muted-foreground">{date(scan.completed_at)}</TableCell></TableRow>)}</TableBody></Table></div>{scans.length === 0 && <div className="p-12 text-center text-sm text-muted-foreground">No scan history yet.</div>}</CardContent></Card>
+  </div>;
+}
+function Status({ status }: { status: string }) { const good = ["completed", "success"].includes(status.toLowerCase()); const bad = ["failed", "error"].includes(status.toLowerCase()); const Icon = good ? CheckCircle : bad ? XCircle : AlertTriangle; return <Badge variant="outline" className={cn("gap-1 capitalize", good && "border-green-500/20 bg-green-500/10 text-green-600", bad && "border-red-500/20 bg-red-500/10 text-red-500", !good && !bad && "border-amber-500/20 bg-amber-500/10 text-amber-600")}><Icon className="h-3 w-3" />{status}</Badge>; }
