@@ -15,13 +15,12 @@ from models import (
     ScrapeStatus,
     Alert,
     ScanLog,
+    Case,
+    CaseStatus,
 )
-from scraper import search_craigslist, search_facebook_marketplace
-from craigslist_detail import enrich_craigslist_listings
-from geocode import geocode_pending_properties
-from detector import analyze_listing as analyze_listing_ai
 from detector import parse_listing_text
-from notifier import send_fraud_alert
+from pipeline import run_scan, process_listing
+from scheduler import start_scheduler, shutdown_scheduler, scheduler_status, scan_health
 from config import (
     APIFY_API_KEY,
     TWILIO_ENABLED,
@@ -31,6 +30,9 @@ from config import (
     ALERT_PHONE_NUMBER,
     SCRAPE_CITY,
     SCRAPE_STATE,
+    OBSERVE_MODE,
+    SCHEDULER_ENABLED,
+    SCAN_INTERVAL_HOURS,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,177 +79,9 @@ class ConfigStatus(BaseModel):
     scrape_city: str = ""
     scrape_state: str = ""
     alert_phone: str = ""
-
-
-# ─── Scanner Logic ──────────────────────────────────────────────────────────
-
-async def _process_listing(listing_data: dict, property_dicts: list[dict]) -> dict:
-    """Insert one listing, run AI fraud analysis, update its status, and
-    record an alert when fraud is detected with high confidence.
-
-    Returns a dict with the stored listing_id, the analysis result, and
-    alert outcome (alert_status is None when no alert was attempted).
-    """
-    session = SessionLocal()
-    listing = ScrapedListing(
-        source=listing_data["source"],
-        external_id=listing_data.get("external_id"),
-        title=listing_data.get("title", "Untitled"),
-        price=listing_data.get("price"),
-        location=listing_data.get("location"),
-        description=listing_data.get("description"),
-        url=listing_data.get("url", ""),
-        image_urls=listing_data.get("image_urls"),
-        street_address=listing_data.get("street_address"),
-        latitude=listing_data.get("latitude"),
-        longitude=listing_data.get("longitude"),
-        enriched=bool(listing_data.get("enriched")),
-        fraud_status=ScrapeStatus.UNKNOWN,
-    )
-    session.add(listing)
-    session.commit()
-    listing_id = listing.id
-    session.close()
-
-    try:
-        result = await analyze_listing_ai(listing_data, property_dicts)
-    except Exception as e:
-        logger.exception("AI analysis failed for listing %s", listing_id)
-        result = {
-            "fraud_status": "unknown",
-            "confidence": 0.0,
-            "reason": f"AI analysis error: {e}",
-            "matched_property_id": None,
-        }
-
-    session = SessionLocal()
-    db_listing = session.query(ScrapedListing).filter_by(id=listing_id).first()
-    if db_listing:
-        db_listing.fraud_status = ScrapeStatus(result["fraud_status"])
-        db_listing.fraud_confidence = result["confidence"]
-        db_listing.fraud_reason = result["reason"]
-        if result.get("matched_property_id"):
-            db_listing.matched_property_id = uuid.UUID(result["matched_property_id"])
-        session.commit()
-
-    alert_status = None
-    alert_sent = False
-    if result["fraud_status"] == "fraud" and result["confidence"] >= 0.7:
-        matched_name = "Unknown"
-        if result.get("matched_property_id"):
-            prop = session.query(Property).filter_by(
-                id=uuid.UUID(result["matched_property_id"])
-            ).first()
-            if prop:
-                matched_name = prop.name
-
-        alert_result = send_fraud_alert(listing_data, matched_name)
-        alert_status = alert_result.get("status", "failed")
-
-        alert = Alert(
-            listing_id=listing_id,
-            property_id=uuid.UUID(result["matched_property_id"]) if result.get("matched_property_id") else None,
-            alert_type="sms",
-            recipient=ALERT_PHONE_NUMBER,
-            message=f"Fraud alert for {matched_name} on {listing_data.get('source', 'Unknown')}",
-            status=alert_result.get("status", "failed"),
-            sent_at=datetime.now(timezone.utc) if alert_result.get("status") == "sent" else None,
-            error_message=alert_result.get("error_message"),
-        )
-        session.add(alert)
-        session.commit()
-        alert_sent = alert_result.get("status") == "sent"
-
-    session.close()
-
-    return {
-        "listing_id": str(listing_id),
-        "fraud_status": result["fraud_status"],
-        "confidence": result["confidence"],
-        "reason": result["reason"],
-        "matched_property_id": result.get("matched_property_id"),
-        "alert_status": alert_status,
-        "alert_sent": alert_sent,
-    }
-
-
-async def run_scan(source: str | None = None) -> dict:
-    """Run the full scan pipeline: scrape -> analyze -> alert."""
-    city = SCRAPE_CITY
-    state = SCRAPE_STATE
-
-    session = SessionLocal()
-    scan_log = ScanLog(source=source or "all", status="running")
-    session.add(scan_log)
-    session.commit()
-    scan_id = scan_log.id
-    session.close()
-
-    all_listings = []
-
-    if source in (None, "all", "craigslist"):
-        try:
-            cl_listings = await search_craigslist(city, state)
-            # The Apify actor returns search rows only: no posting body and
-            # rarely a street address. Fetching each posting page directly
-            # fills in body text, street address and coordinates.
-            try:
-                await enrich_craigslist_listings(cl_listings)
-            except Exception:
-                logger.exception("Craigslist enrichment error (continuing unenriched)")
-            all_listings.extend(cl_listings)
-        except Exception:
-            logger.exception("Craigslist scrape error")
-
-    if source in (None, "all", "facebook_marketplace"):
-        try:
-            fb_listings = await search_facebook_marketplace(city, state)
-            all_listings.extend(fb_listings)
-        except Exception:
-            logger.exception("Facebook Marketplace scrape error")
-
-    logger.info("Total listings found: %s", len(all_listings))
-
-    # Properties need coordinates before geo matching can work. Cached on the
-    # row, so this is a no-op after the first scan.
-    try:
-        geocode_pending_properties()
-    except Exception:
-        logger.exception("Property geocoding error (continuing without geo match)")
-
-    session = SessionLocal()
-    properties = session.query(Property).all()
-    property_dicts = [p.to_dict() for p in properties]
-    session.close()
-
-    fraud_count = 0
-    alert_count = 0
-
-    for listing_data in all_listings:
-        result = await _process_listing(listing_data, property_dicts)
-        if result["fraud_status"] == "fraud" and result["confidence"] >= 0.7:
-            fraud_count += 1
-        if result["alert_sent"]:
-            alert_count += 1
-
-    session = SessionLocal()
-    scan = session.query(ScanLog).filter_by(id=scan_id).first()
-    if scan:
-        scan.listings_found = len(all_listings)
-        scan.fraud_found = fraud_count
-        scan.alerts_sent = alert_count
-        scan.status = "completed"
-        scan.completed_at = datetime.now(timezone.utc)
-        session.commit()
-    session.close()
-
-    return {
-        "scan_id": str(scan_id),
-        "listings_found": len(all_listings),
-        "fraud_found": fraud_count,
-        "alerts_sent": alert_count,
-        "source": source or "all",
-    }
+    observe_mode: bool = True
+    scheduler_enabled: bool = False
+    scan_interval_hours: float = 4
 
 
 # ─── FastAPI App Factory ─────────────────────────────────────────────────────
@@ -376,7 +210,7 @@ def create_app(static_dir: str) -> FastAPI:
         property_dicts = [p.to_dict() for p in properties]
         session.close()
 
-        result = await _process_listing(listing_data, property_dicts)
+        result = await process_listing(listing_data, property_dicts)
 
         session = SessionLocal()
         listing = session.query(ScrapedListing).filter_by(id=uuid.UUID(result["listing_id"])).first()
@@ -425,7 +259,7 @@ def create_app(static_dir: str) -> FastAPI:
 
     @api.post("/scan")
     async def trigger_scan(source: str | None = "all"):
-        result = await run_scan(source)
+        result = await run_scan(source, trigger="manual")
         return result
 
     @api.get("/scans")
@@ -435,6 +269,67 @@ def create_app(static_dir: str) -> FastAPI:
         result = [s.to_dict() for s in scans]
         session.close()
         return result
+
+    @api.get("/scans/health")
+    def scans_health():
+        """Whether we are actually seeing the market. Surfaced in the UI so a
+        blocked scraper can't masquerade as 'no fraud found'."""
+        return {**scan_health(), "scheduler": scheduler_status()}
+
+    # ── Cases ─────────────────────────────────────────────────────────────
+
+    class CaseUpdate(BaseModel):
+        status: str
+
+    @api.get("/cases")
+    def list_cases(status: str | None = None, limit: int = 100):
+        """Cases, richest-first, with their listing and property inlined —
+        the review queue is the screen someone actually works from."""
+        session = SessionLocal()
+        query = session.query(Case).order_by(Case.opened_at.desc())
+        if status:
+            try:
+                query = query.filter(Case.status == CaseStatus(status))
+            except ValueError:
+                session.close()
+                raise HTTPException(status_code=400, detail=f"Unknown status '{status}'")
+        cases = query.limit(limit).all()
+
+        result = []
+        for case in cases:
+            listing = session.query(ScrapedListing).filter_by(id=case.listing_id).first()
+            prop = session.query(Property).filter_by(id=case.property_id).first()
+            alerts = session.query(Alert).filter_by(case_id=case.id).count()
+            result.append({
+                **case.to_dict(),
+                "alerts_recorded": alerts,
+                "listing": listing.to_dict() if listing else None,
+                "property_name": prop.name if prop else None,
+            })
+        session.close()
+        return result
+
+    @api.put("/cases/{case_id}")
+    def update_case(case_id: str, data: CaseUpdate):
+        """Move a case through its lifecycle. Dismissing or resolving one also
+        silences it permanently — that is the point."""
+        try:
+            new_status = CaseStatus(data.status)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Unknown status '{data.status}'")
+        session = SessionLocal()
+        try:
+            case = session.query(Case).filter_by(id=uuid.UUID(case_id)).first()
+            if not case:
+                raise HTTPException(status_code=404, detail="Case not found")
+            case.status = new_status
+            case.updated_at = datetime.now(timezone.utc)
+            if new_status in (CaseStatus.RESOLVED, CaseStatus.DISMISSED):
+                case.resolved_at = datetime.now(timezone.utc)
+            session.commit()
+            return case.to_dict()
+        finally:
+            session.close()
 
     # ── Alerts ────────────────────────────────────────────────────────────
 
@@ -460,6 +355,9 @@ def create_app(static_dir: str) -> FastAPI:
             scrape_city=SCRAPE_CITY,
             scrape_state=SCRAPE_STATE,
             alert_phone=ALERT_PHONE_NUMBER,
+            observe_mode=OBSERVE_MODE,
+            scheduler_enabled=SCHEDULER_ENABLED,
+            scan_interval_hours=SCAN_INTERVAL_HOURS,
         )
 
     # ── Stats/Dashboard ───────────────────────────────────────────────────
@@ -478,12 +376,18 @@ def create_app(static_dir: str) -> FastAPI:
             .order_by(ScanLog.started_at.desc())
             .first()
         )
+        open_cases = session.query(Case).filter(
+            Case.status.in_([CaseStatus.OPEN, CaseStatus.ACKNOWLEDGED])
+        ).count()
         result = {
             "total_properties": total_properties,
             "total_listings_scraped": total_listings,
             "fraud_detected": fraud_listings,
             "alerts_sent": total_alerts,
+            "open_cases": open_cases,
             "last_scan": last_scan.to_dict() if last_scan else None,
+            "scan_health": scan_health(),
+            "observe_mode": OBSERVE_MODE,
         }
         session.close()
         return result
@@ -492,6 +396,14 @@ def create_app(static_dir: str) -> FastAPI:
 
     app = FastAPI(title="fillory fraud detector")
     app.include_router(api, prefix="/api")
+
+    @app.on_event("startup")
+    def _startup():
+        start_scheduler()
+
+    @app.on_event("shutdown")
+    def _shutdown():
+        shutdown_scheduler()
 
     if os.path.isdir(static_dir):
         assets_dir = os.path.join(static_dir, "assets")

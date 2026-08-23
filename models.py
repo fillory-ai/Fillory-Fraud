@@ -1,7 +1,18 @@
 """Database models for rental fraud detector."""
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, Text, Boolean, Float, DateTime, Integer, Enum as SAEnum
+from sqlalchemy import (
+    Column,
+    String,
+    Text,
+    Boolean,
+    Float,
+    DateTime,
+    Integer,
+    Index,
+    text,
+    Enum as SAEnum,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from database import Base
 
@@ -68,6 +79,19 @@ class ScrapedListing(Base):
     """A listing scraped from Craigslist or Facebook Marketplace."""
     __tablename__ = "scraped_listings"
 
+    __table_args__ = (
+        # One row per real posting. Partial because manually-pasted listings
+        # have no external_id and must stay insertable.
+        Index(
+            "uq_listing_source_external",
+            "source",
+            "external_id",
+            unique=True,
+            postgresql_where=text("external_id IS NOT NULL"),
+        ),
+        Index("ix_listing_last_seen", "last_seen_at"),
+    )
+
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     source = Column(String(50), nullable=False)  # "craigslist" or "facebook_marketplace"
     external_id = Column(String(500), nullable=True)
@@ -82,6 +106,20 @@ class ScrapedListing(Base):
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
     enriched = Column(Boolean, default=False)  # detail page fetched?
+    # ── Listing identity over time ────────────────────────────────────────
+    # A listing is one real-world posting, not one row per sighting. Repeat
+    # sightings update these instead of inserting a duplicate.
+    first_seen_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    last_seen_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    times_seen = Column(Integer, default=1, nullable=False)
+    # Set when a scan of its market no longer returns it — the closest thing we
+    # get to "this listing was taken down", and the signal enforcement tracking
+    # needs to prove a takedown worked.
+    delisted_at = Column(DateTime(timezone=True), nullable=True)
+    # Hash of the fields that would change our verdict. Unchanged fingerprint
+    # on re-sighting means we can skip re-running the AI, which is the main
+    # cost gate on scanning frequently.
+    content_fingerprint = Column(String(64), nullable=True)
     fraud_status = Column(SAEnum(ScrapeStatus), default=ScrapeStatus.UNKNOWN)
     fraud_confidence = Column(Float, nullable=True)
     fraud_reason = Column(Text, nullable=True)
@@ -109,6 +147,10 @@ class ScrapedListing(Base):
             "latitude": self.latitude,
             "longitude": self.longitude,
             "enriched": bool(self.enriched),
+            "first_seen_at": self.first_seen_at.isoformat() if self.first_seen_at else None,
+            "last_seen_at": self.last_seen_at.isoformat() if self.last_seen_at else None,
+            "times_seen": self.times_seen or 1,
+            "delisted_at": self.delisted_at.isoformat() if self.delisted_at else None,
             "fraud_status": self.fraud_status.value if self.fraud_status else "unknown",
             "fraud_confidence": self.fraud_confidence,
             "fraud_reason": self.fraud_reason,
@@ -119,6 +161,68 @@ class ScrapedListing(Base):
         }
 
 
+class CaseStatus(enum.Enum):
+    """Lifecycle of a suspected impersonation."""
+    OPEN = "open"            # detected, not yet acted on
+    ACKNOWLEDGED = "acknowledged"
+    FILED = "filed"          # takedown notice sent (v1 M5)
+    RESOLVED = "resolved"    # listing gone
+    DISMISSED = "dismissed"  # false positive, or the firm's own listing
+    DISPUTED = "disputed"    # counter-notice received; all automation stops
+
+
+class Case(Base):
+    """A suspected impersonation of one property by one listing.
+
+    The unit of *alerting*. v0 alerted per detection, which meant the same
+    fraudulent listing paged the user on every scan — the defect that would
+    make scheduled scanning unusable. A case is opened once, alerted once, and
+    thereafter updated silently unless something material changes.
+    """
+    __tablename__ = "cases"
+
+    __table_args__ = (
+        # One case per (listing, property) pair. Re-detection finds this row
+        # instead of creating another.
+        Index("uq_case_listing_property", "listing_id", "property_id", unique=True),
+        Index("ix_case_status", "status"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    listing_id = Column(UUID(as_uuid=True), nullable=False)
+    property_id = Column(UUID(as_uuid=True), nullable=False)
+    status = Column(SAEnum(CaseStatus), default=CaseStatus.OPEN, nullable=False)
+    confidence = Column(Float, nullable=True)
+    reason = Column(Text, nullable=True)
+    # Which signal produced the match, for auditability.
+    match_signal = Column(String(100), nullable=True)
+    opened_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    # Alert bookkeeping — the whole point of the table.
+    last_alert_at = Column(DateTime(timezone=True), nullable=True)
+    alert_count = Column(Integer, default=0, nullable=False)
+    # Free-text log of what changed since opening (price moved, relisted, etc.)
+    change_log = Column(Text, nullable=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "listing_id": str(self.listing_id),
+            "property_id": str(self.property_id),
+            "status": self.status.value if self.status else "open",
+            "confidence": self.confidence,
+            "reason": self.reason,
+            "match_signal": self.match_signal,
+            "opened_at": self.opened_at.isoformat() if self.opened_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "last_alert_at": self.last_alert_at.isoformat() if self.last_alert_at else None,
+            "alert_count": self.alert_count or 0,
+            "change_log": self.change_log,
+            "resolved_at": self.resolved_at.isoformat() if self.resolved_at else None,
+        }
+
+
 class Alert(Base):
     """An alert sent to the user about a suspicious listing."""
     __tablename__ = "alerts"
@@ -126,6 +230,7 @@ class Alert(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     listing_id = Column(UUID(as_uuid=True), nullable=False)
     property_id = Column(UUID(as_uuid=True), nullable=True)
+    case_id = Column(UUID(as_uuid=True), nullable=True)
     alert_type = Column(String(50), nullable=False)  # "sms", "email"
     recipient = Column(String(255), nullable=False)
     message = Column(Text, nullable=False)
@@ -139,6 +244,7 @@ class Alert(Base):
             "id": str(self.id),
             "listing_id": str(self.listing_id),
             "property_id": str(self.property_id) if self.property_id else None,
+            "case_id": str(self.case_id) if self.case_id else None,
             "alert_type": self.alert_type,
             "recipient": self.recipient,
             "message": self.message[:200] + "..." if len(self.message) > 200 else self.message,
@@ -155,7 +261,16 @@ class ScanLog(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     source = Column(String(50), nullable=False)
+    # "manual" (someone clicked Scan) or "scheduled" (the M1 scheduler).
+    trigger = Column(String(20), default="manual", nullable=False)
     listings_found = Column(Integer, default=0)
+    listings_new = Column(Integer, default=0)
+    listings_updated = Column(Integer, default=0)
+    cases_opened = Column(Integer, default=0)
+    # Share of Craigslist rows whose detail page fetched successfully. A
+    # sustained drop here means the scraper is being blocked — the failure mode
+    # that would otherwise look like "no fraud found".
+    enrichment_rate = Column(Float, nullable=True)
     fraud_found = Column(Integer, default=0)
     alerts_sent = Column(Integer, default=0)
     status = Column(String(50), default="running")  # "running", "completed", "failed"
@@ -167,7 +282,12 @@ class ScanLog(Base):
         return {
             "id": str(self.id),
             "source": self.source,
+            "trigger": self.trigger or "manual",
             "listings_found": self.listings_found,
+            "listings_new": self.listings_new or 0,
+            "listings_updated": self.listings_updated or 0,
+            "cases_opened": self.cases_opened or 0,
+            "enrichment_rate": self.enrichment_rate,
             "fraud_found": self.fraud_found,
             "alerts_sent": self.alerts_sent,
             "status": self.status,

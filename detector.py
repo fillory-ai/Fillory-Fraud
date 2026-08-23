@@ -231,6 +231,22 @@ def _geo_distance_metres(listing: dict, prop: dict) -> Optional[float]:
 def _find_best_address_match(listing: dict, properties: list[dict]) -> Optional[dict]:
     """Find the property this listing refers to, if any.
 
+    Thin wrapper over `_match_with_signal` that returns just the property, for
+    callers (and the regression suite) that don't care which signal fired.
+    """
+    return _match_with_signal(listing, properties)[0]
+
+
+def _match_with_signal(
+    listing: dict, properties: list[dict]
+) -> tuple[Optional[dict], str, float]:
+    """Find the property this listing refers to, plus *why* it matched.
+
+    Returns (property_or_None, signal_description, score). The signal is
+    recorded on the resulting case: when we eventually put a takedown notice in
+    front of a human to sign, "matched via geo (12m)" and "matched via zip+4"
+    are very different levels of evidence and they must be able to see which.
+
     Four independent signals, strongest first:
       1. Geo proximity (1.0) — listing coordinates within
          GEO_MATCH_RADIUS_METRES of the property. Robust to any spelling.
@@ -289,14 +305,14 @@ def _find_best_address_match(listing: dict, properties: list[dict]) -> Optional[
             (address_text or listing.get("title", ""))[:70],
             _build_full_property_address(best_match),
         )
-        return best_match
+        return best_match, best_signal, best_score
 
     logger.info(
         "No address match for listing='%s' (best score=%.2f)",
         (address_text or listing.get("title", ""))[:70],
         best_score,
     )
-    return None
+    return None, "", best_score
 
 
 def _get_gemini_client() -> genai.Client:
@@ -395,13 +411,14 @@ async def analyze_listing(listing: dict, properties: list[dict]) -> dict:
         properties: A list of real property dicts (matches Property.to_dict() schema).
 
     Returns:
-        A dict with keys: fraud_status, confidence, reason, matched_property_id.
+        A dict with keys: fraud_status, confidence, reason, matched_property_id,
+        match_signal.
     """
     # 1. Quick address similarity check.
     # A listing that doesn't match any owned property's address is simply
     # unrelated to the monitored portfolio — it is NOT fraud. Fraud means a
     # listing that impersonates one of our properties.
-    matched_property = _find_best_address_match(listing, properties)
+    matched_property, match_signal, _score = _match_with_signal(listing, properties)
 
     if not matched_property:
         return {
@@ -409,6 +426,7 @@ async def analyze_listing(listing: dict, properties: list[dict]) -> dict:
             "confidence": 0.0,
             "reason": "No address match — listing is not related to any monitored property",
             "matched_property_id": None,
+            "match_signal": None,
         }
 
     # 2. Use Gemini to analyze the matched pair
@@ -486,6 +504,7 @@ async def analyze_listing(listing: dict, properties: list[dict]) -> dict:
                 "confidence": confidence,
                 "reason": reason,
                 "matched_property_id": matched_property.get("id"),
+                "match_signal": match_signal,
             }
 
         except Exception as exc:
@@ -500,6 +519,7 @@ async def analyze_listing(listing: dict, properties: list[dict]) -> dict:
         "confidence": 0.0,
         "reason": f"AI analysis service unavailable: {last_error}",
         "matched_property_id": matched_property.get("id"),
+        "match_signal": match_signal,
     }
 
 
