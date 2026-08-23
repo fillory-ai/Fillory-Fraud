@@ -71,6 +71,45 @@ def main():
             check("invalid status rejected", "no error", "HTTP 400")
         except urllib.error.HTTPError as e:
             check("invalid status rejected", e.code, 400)
+
+        # ── Disposition codes ───────────────────────────────────────────────
+        # Closing a case is the only moment we ever get a label out of a human,
+        # so the API refuses to let it happen silently.
+        try:
+            request("PUT", f"/api/cases/{case_id}", {"status": "dismissed"})
+            check("closing without a resolution_code rejected", "no error", "HTTP 400")
+        except urllib.error.HTTPError as e:
+            check("closing without a resolution_code rejected", e.code, 400)
+
+        try:
+            request("PUT", f"/api/cases/{case_id}",
+                    {"status": "dismissed", "resolution_code": "made-this-up"})
+            check("unknown resolution_code rejected", "no error", "HTTP 400")
+        except urllib.error.HTTPError as e:
+            check("unknown resolution_code rejected", e.code, 400)
+
+        # Acknowledging must stay a one-click action — no code required.
+        ack = request("PUT", f"/api/cases/{case_id}", {"status": "acknowledged"})
+        check("acknowledge still needs no resolution_code", ack["status"], "acknowledged")
+
+        closed = request("PUT", f"/api/cases/{case_id}", {
+            "status": "dismissed",
+            "resolution_code": "false_positive_match",
+            "resolution_note": "matched the building next door",
+        })
+        check("dismiss with a code succeeds", closed["status"], "dismissed")
+        check("resolution_code persisted", closed["resolution_code"],
+              "false_positive_match")
+        check("resolution_note persisted", closed["resolution_note"],
+              "matched the building next door")
+        check("closing stamps resolved_at", closed["resolved_at"] is not None, True)
+
+        codes = request("GET", "/api/cases/resolution-codes")
+        check("resolution-codes endpoint serves the vocabulary", len(codes) >= 6, True)
+        check("every code carries a human label",
+              all(c.get("code") and c.get("label") for c in codes), True)
+        check("the three false-positive modes are distinguishable",
+              sum(1 for c in codes if c["code"].startswith("false_positive")), 3)
     finally:
         session = SessionLocal()
         session.query(Case).filter(Case.id == case_id).delete()

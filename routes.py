@@ -17,6 +17,7 @@ from models import (
     ScanLog,
     Case,
     CaseStatus,
+    RESOLUTION_CODES,
 )
 from detector import parse_listing_text
 from pipeline import run_scan, process_listing
@@ -280,6 +281,14 @@ def create_app(static_dir: str) -> FastAPI:
 
     class CaseUpdate(BaseModel):
         status: str
+        # Why, not just what. Optional on the wire so acknowledging a case
+        # stays a one-click action, but required by the rule below for the
+        # closing transitions where the answer is the tuning signal.
+        resolution_code: str | None = None
+        resolution_note: str | None = None
+
+    # Closing a case without saying why throws away the only label we ever get.
+    _CLOSING_STATUSES = (CaseStatus.RESOLVED, CaseStatus.DISMISSED)
 
     def _case_payload(session, case):
         """The shape the review queue renders.
@@ -325,6 +334,21 @@ def create_app(static_dir: str) -> FastAPI:
             new_status = CaseStatus(data.status)
         except ValueError:
             raise HTTPException(status_code=400, detail=f"Unknown status '{data.status}'")
+
+        if data.resolution_code and data.resolution_code not in RESOLUTION_CODES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown resolution_code '{data.resolution_code}'. "
+                       f"Expected one of: {', '.join(sorted(RESOLUTION_CODES))}",
+            )
+        if new_status in _CLOSING_STATUSES and not data.resolution_code:
+            raise HTTPException(
+                status_code=400,
+                detail=f"resolution_code is required when setting status to "
+                       f"'{data.status}' — closing a case is the only moment we "
+                       f"learn whether the detector was right.",
+            )
+
         session = SessionLocal()
         try:
             case = session.query(Case).filter_by(id=uuid.UUID(case_id)).first()
@@ -332,12 +356,21 @@ def create_app(static_dir: str) -> FastAPI:
                 raise HTTPException(status_code=404, detail="Case not found")
             case.status = new_status
             case.updated_at = datetime.now(timezone.utc)
-            if new_status in (CaseStatus.RESOLVED, CaseStatus.DISMISSED):
+            if data.resolution_code:
+                case.resolution_code = data.resolution_code
+            if data.resolution_note is not None:
+                case.resolution_note = data.resolution_note
+            if new_status in _CLOSING_STATUSES:
                 case.resolved_at = datetime.now(timezone.utc)
             session.commit()
             return _case_payload(session, case)
         finally:
             session.close()
+
+    @api.get("/cases/resolution-codes")
+    def resolution_codes():
+        """The disposition vocabulary, served so the UI can't drift from it."""
+        return [{"code": c, "label": label} for c, label in RESOLUTION_CODES.items()]
 
     # ── Alerts ────────────────────────────────────────────────────────────
 

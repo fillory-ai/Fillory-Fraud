@@ -1,5 +1,7 @@
 """AI fraud detection service for rental listings."""
 
+import hashlib
+import inspect
 import logging
 import os
 import re
@@ -403,6 +405,25 @@ Return your assessment as structured JSON with:
     return prompt
 
 
+def _compute_prompt_version() -> str:
+    """Short hash identifying the exact prompt that produced a verdict.
+
+    Hashing the source of `_build_analysis_prompt` plus the few-shot block means
+    this changes automatically whenever the prompt is edited — nobody has to
+    remember to bump a constant. Stored on every Case so that verdicts from
+    before and after a prompt change are distinguishable rather than silently
+    incomparable.
+    """
+    try:
+        material = inspect.getsource(_build_analysis_prompt) + _FEW_SHOT_EXAMPLES
+    except (OSError, TypeError):  # pragma: no cover - source always available in practice
+        material = _FEW_SHOT_EXAMPLES
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
+
+
+_PROMPT_VERSION = _compute_prompt_version()
+
+
 async def analyze_listing(listing: dict, properties: list[dict]) -> dict:
     """Compare a scraped listing against real properties and return fraud analysis.
 
@@ -427,6 +448,9 @@ async def analyze_listing(listing: dict, properties: list[dict]) -> dict:
             "reason": "No address match — listing is not related to any monitored property",
             "matched_property_id": None,
             "match_signal": None,
+            # No model was consulted, so there is no model to attribute this to.
+            "model_name": None,
+            "prompt_version": _PROMPT_VERSION,
         }
 
     # 2. Use Gemini to analyze the matched pair
@@ -505,6 +529,10 @@ async def analyze_listing(listing: dict, properties: list[dict]) -> dict:
                 "reason": reason,
                 "matched_property_id": matched_property.get("id"),
                 "match_signal": match_signal,
+                # Which model actually answered — not which one we asked first.
+                # The fallback chain means these differ more often than you'd think.
+                "model_name": model_name,
+                "prompt_version": _PROMPT_VERSION,
             }
 
         except Exception as exc:
@@ -520,6 +548,8 @@ async def analyze_listing(listing: dict, properties: list[dict]) -> dict:
         "reason": f"AI analysis service unavailable: {last_error}",
         "matched_property_id": matched_property.get("id"),
         "match_signal": match_signal,
+        "model_name": None,
+        "prompt_version": _PROMPT_VERSION,
     }
 
 

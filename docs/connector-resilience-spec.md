@@ -47,7 +47,7 @@ this spec is mostly about *surfacing* data we are already writing.
 | Degradation-aware safety | **Done** | Delisting coverage guard (`DELIST_MIN_COVERAGE`) refuses to interpret a truncated scrape as an emptied market |
 | Trailing per-source volume | **Done** | `scan_logs.source_counts` written every scan; `_recent_source_average()` computes the mean over `DELIST_COVERAGE_WINDOW` |
 | Enrichment quality signal | **Partial** | `scan_logs.enrichment_rate` exists for Craigslist only, and nothing alerts on it |
-| Global staleness monitoring | **Done** | `scheduler.scan_health()` + hourly `_health_check()` + dashboard banner. Ages from `started_at`, not `completed_at` (`scheduler.py:65`) — see §3.7 |
+| Global staleness monitoring | **Done** | `scheduler.scan_health()` + hourly `_health_check()` + dashboard banner. Ages from `started_at`, not `completed_at` (`scheduler.py:65`) — see §3.9 |
 
 The gap is narrow and specific: **all of the monitoring is global, and none of it is
 per-source.**
@@ -279,7 +279,52 @@ A field absent from a source's table is never checked — that is how we encode
 Completeness is computed over the rows the source actually returned; a source with
 `rows == 0` reports `{}` and is caught by the volume rules instead.
 
-### 3.6 Actor pinning (F4)
+### 3.6 Typed ingestion (Pydantic at the connector boundary)
+
+Field-completeness floors catch *missing* data. They do not catch data that is
+present and wrong-shaped — a `price` that arrives as `"$1,200/mo"` instead of a float,
+an `image_urls` that becomes a list where it was a comma-joined string. That drift
+reaches the detector as garbage and produces a confident wrong answer rather than an
+error.
+
+We already use Pydantic for the Gemini response (`FraudAnalysisResult`) and for every
+API request body. The one place it is absent is the boundary where untrusted data
+actually enters: `scraper._build_listing()` returns a bare dict.
+
+Add a `ScrapedListingIn` model validated at the end of `_build_listing()`. Rejected
+items are counted per source, not silently dropped — a rising validation-failure rate
+is itself a degradation signal and should feed `classify_source()` alongside the
+completeness floors. Two distinct questions, two distinct signals:
+
+| | Catches | Signal |
+|---|---|---|
+| Schema validation | Wrong *type* or shape | `validation_failures` count |
+| Completeness floors | Missing *values* | `fields` rates |
+
+### 3.7 Retry, backoff, and a circuit breaker
+
+There is currently **no retry anywhere** — not in `scraper.py`, not in
+`craigslist_detail.py`. The only sleep in the codebase is the politeness delay between
+Craigslist detail fetches.
+
+This matters more once §3.4 exists than it does today: a single transient blip
+currently costs us one thin scan, but under per-source health it would classify a
+source as `down` and page someone. **Retries must land before or with the health
+work, or the health signal will be noisy enough that people learn to ignore it** —
+which is the exact failure this whole milestone is trying to prevent.
+
+Minimum: three attempts with exponential backoff and jitter on the Apify call and on
+each Craigslist detail fetch; distinguish retryable (timeout, 5xx, 429) from terminal
+(401, 403) and do not retry the latter. A circuit breaker that stops attempting a
+source after a sustained failure rate is worth having for cost control on a metered
+API, but it is second-order — note it and defer.
+
+Dead-letter storage for individual unparseable items, and synthetic canary jobs
+against a known-static listing, both came out of the research as sensible at larger
+scale. At two sources with a trailing-average baseline they earn their keep less
+clearly than the above. Deferred, deliberately.
+
+### 3.8 Actor pinning (F4)
 
 ```python
 CRAWLER_ACTOR_ID    = "automation-lab/craigslist-scraper"
@@ -296,7 +341,7 @@ warning" for "silently stops receiving fixes." Recording the version is unambigu
 good; pinning is a judgement call we want to be able to make per source, at runtime,
 without a deploy.
 
-### 3.7 API
+### 3.9 API
 
 `/api/scans/health` gains a `sources` map:
 
@@ -333,7 +378,7 @@ reported as older than it is, and a scan that starts but never finishes still ad
 the clock as far as this calculation is concerned. Should be `completed_at` with
 `started_at` as a fallback.
 
-### 3.8 UI — coverage widget
+### 3.10 UI — coverage widget
 
 New card on the Dashboard, above the fold, always visible — not conditional the way
 the current health banner is. A status display that only appears when something is
@@ -354,7 +399,7 @@ This is the piece that converts a liability into a trust signal. A customer who 
 see "FB degraded, we know, here's since when" is being told the truth by a product
 that is working. A customer who discovers it themselves has caught us not looking.
 
-### 3.9 Escalation
+### 3.11 Escalation
 
 `scheduler._health_check()` runs hourly and already escalates staleness to us and
 never to the customer. It gains per-source escalation on the same terms, gated by
@@ -425,10 +470,15 @@ choice was sound.
 | d | Dashboard coverage widget + Scans tab per-source columns | M | The customer-visible half |
 | e | Record and optionally pin Apify actor builds | S | Recording first, pinning later |
 | f | Best-effort coverage language in `property-firm-brief.md` | prose | Do this **first** — see §7 |
+| g | Retry + backoff around the Apify and detail-fetch calls (§3.7) | S | Land **with or before** (c), or the health signal is noisy from day one |
+| h | `ScrapedListingIn` Pydantic model at the connector boundary (§3.6) | S | Cheap once (a0) exists — the failure has somewhere to be reported |
+| i | Circuit breaker on repeated source failure (§3.7) | S | Only worth it after (g) and (b) give it something to count |
 
 (a0) is worth shipping on its own even if nothing else in this milestone gets built:
 it converts the majority of our failure modes from silent to visible for maybe thirty
 lines. (a)–(c) are then mostly wiring up data we already write. (d) is the real work.
+(g)–(i) came out of the table-stakes research (2026-08-23) and are ordered by what
+they depend on rather than by size.
 
 ---
 
@@ -456,6 +506,36 @@ sequenced first despite being the smallest item.
 That asymmetry is an argument for a second Facebook actor as failover before it is an
 argument for deepening our investment in the one we have.
 
+**We can write and publish our own Apify actors — and sell them.** This reframes the
+Facebook dependency from a liability into an option we have not exercised.
+
+- There is not one canonical Facebook Marketplace actor. Several exist, they are
+  maintained at different cadences, and the one we use
+  (`apify/facebook-marketplace-scraper`) is updated regularly *by someone else*. Every
+  one of those updates is an unannounced change to our input contract — which is the
+  case for recording the build hash (phase e) independent of everything else here.
+- Multiple actors is a **failover** story first: two actors, same normalized
+  `_build_listing()` contract, second one runs when the first returns `ok=False` or
+  falls below the degraded floor. Cheap, because the contract already exists.
+- Publishing our own is a **control** story: we set the update cadence, we know why it
+  broke, and the restore window stops being someone else's decision. It costs us the
+  maintenance we are currently renting.
+- Selling it is a **revenue** story, and a strategically consistent one — the whole
+  premise of §0 is that connector upkeep is the durable work. An actor on the Apify
+  store monetises that upkeep against a market wider than our own customer base, and
+  its usage tells us it broke before our own scan does.
+
+Sequencing: none of this is M1.5. It is only sane after (a0) and (b), because building
+an actor without per-source telemetry means maintaining it blind. Recorded here so the
+decision is made deliberately rather than by drift.
+
+**Open question with legal consequences: does the Facebook actor authenticate?** We
+have not checked. Post-*hiQ* and *Van Buren*, scraping public data is largely defused
+under the CFAA; the bright line is logging in. If the actor uses session cookies or a
+burner account, we are on the other side of that line and inside Facebook's ToS as a
+contract matter regardless of the CFAA. This has to be answered before we sign a
+customer, and it is a hard requirement on any actor we publish ourselves.
+
 **What the subscription buys**, stated plainly: continuous cross-platform monitoring,
 matching and alerting, *and ongoing connector maintenance* — the last being the line
 item that recurs. The detection engine is largely finished. The treadmill is not.
@@ -466,11 +546,11 @@ item that recurs. The detection engine is largely finished. The treadmill is not
 
 Recorded so we don't relitigate:
 
-- **Multi-actor failover.** Right idea, premature — we have no second FB actor
-  evaluated and no evidence of a first failure yet.
+- **Multi-actor failover, and publishing our own actor.** Right idea, out of scope
+  *for M1.5* — see §7. Both need per-source telemetry (a0, b) to exist first.
 - **Proxies, captcha solving, headless browsers.** Only relevant for Facebook detail
   enrichment, which we have not attempted. Large cost, no measured need.
-- **Customer-facing coverage SMS/email.** §3.9. Operational alerts do not belong in
+- **Customer-facing coverage SMS/email.** §3.11. Operational alerts do not belong in
   the fraud-alert budget.
 - **Historical uptime reporting / status page.** Wants the per-source data to exist
   first. Natural follow-on once (b) has been writing `source_stats` for a while.

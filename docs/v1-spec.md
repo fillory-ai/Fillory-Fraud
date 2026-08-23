@@ -222,7 +222,38 @@ because *address + photos* is categorically stronger than either alone:
 Only **Confirmed** may proceed to enforcement without human review — and even
 then, a human still signs (§8).
 
-### The firm's own listings *(missing requirement, high severity)*
+### Case evidence and decision provenance *(partly built, 2026-08-23)*
+
+An accusatory product has to be able to reproduce any accusation it made, months
+later, after the evidence has been edited away. `scraped_listings` rows are
+updated in place on re-sighting, so without a snapshot the text a verdict rested
+on is destroyed the first time the poster edits their advert — which is exactly
+what someone who suspects they have been spotted does.
+
+**Built:**
+
+- `cases.opening_evidence` — write-once JSON snapshot of the listing as it read
+  when the case was opened, plus `captured_at` and the content fingerprint.
+- `alerts.evidence_snapshot` — the same freeze at the moment each alert fired.
+- `cases.model_name` / `cases.prompt_version` — which model actually answered
+  (not which was asked first) and a hash of the prompt source, so the prompt
+  version bumps itself when anyone edits the prompt. These track the *current*
+  verdict and update on re-analysis; `opening_evidence` deliberately does not.
+- `cases.resolution_code` / `resolution_note` — a required disposition on
+  resolve or dismiss, with three distinct false-positive modes. Status says what
+  happened to the case; the code says what it tells us about the detector.
+  Served to the UI by `GET /api/cases/resolution-codes`.
+
+**Still open — `case_events`, an append-only status history.** Today
+`Case.change_log` is overwritten and `resolution_code` records only the *final*
+disposition. A case that was resolved as `confirmed_fraud`, reopened, and then
+dismissed as `false_positive_match` reads today as though it was only ever the
+latter. For enforcement — where we send a legal notice on the strength of a case
+— we need the whole sequence, with actor and timestamp, and no UPDATE path.
+Small table, no behaviour change, blocks nothing; do it before enforcement (§8)
+rather than before v1.
+
+### The firm's own listings *(table stakes, not polish — high severity)*
 
 A registered property that is actually vacant will be advertised on Craigslist
 and Facebook **by the firm itself** — with the correct address and the firm's
@@ -248,6 +279,14 @@ v1 needs an explicit legitimacy allowlist before it ever sees a real portfolio:
 This also improves detection quality rather than just suppressing noise: a
 listing that matches the property but is *not* from an authorized poster while
 the unit is occupied is close to a definitive impersonation.
+
+**Reprioritised 2026-08-23.** External review of fraud-detection table stakes
+puts allowlisting in the same tier as case management and audit trails — it is
+not a noise-reduction nicety, it is the mechanism that stops the system from
+accusing the customer of impersonating themselves. The first real portfolio we
+onboard will have properties in `marketing`, so this lands *before* the first
+customer, not after. The `false_positive_authorized` resolution code exists now
+and gives us the measurement: if it is being selected, the allowlist is overdue.
 
 ### AI dependency and prompt regression
 
@@ -517,7 +556,8 @@ system still needs a named owner when it breaks.
 |---|---|---|---|
 | **M0** | *Foundation* | ~~Alembic~~ **done**; CI (matcher + golden set + tsc + ruff), staging branch, error tracking still open | — |
 | **M1** | *Trustworthy* | ~~Dedup + upsert + backfill collapse, alert dedup by case, scheduler, failure alerting, observe mode, source health metrics~~ **done** | M0 for the migration |
-| **M1.5** | *Resilient* | Per-source health, field-completeness floors, coverage widget, actor version pinning, best-effort coverage language — see `connector-resilience-spec.md` | M1 for `source_counts` |
+| **M1.5** | *Resilient* | Per-source health, field-completeness floors, coverage widget, actor version pinning, typed ingestion, retry/backoff + circuit breaker, best-effort coverage language — see `connector-resilience-spec.md` | M1 for `source_counts` |
+| **M1.6** | *Accountable* | ~~Evidence snapshots, model/prompt provenance, resolution codes~~ **done**; `case_events` append-only history still open (§6) | — |
 | **M2** | *Verified* | Historical scam replay, recall measurement, coverage measurement, golden-set prompt suite | Needs firm's scam examples |
 | **M3** | *Multi-tenant* | Orgs, Neon Auth, RLS, shared-listing refactor, alert routing, authorized-poster allowlist, property lifecycle | — |
 | **M4** | *Proof* | Layer 3 pHash steps 1–5, then 6–7 | 6–7 need firm's photos |
@@ -528,10 +568,12 @@ system still needs a named owner when it breaks.
 **Status (2026-08-23):** M0's Alembic work and all of M1 are built and
 committed; see `system-spec.md` §3 for the behaviour as shipped. M0's CI,
 staging branch and error tracking are not. **M1.5 (connector resilience) is
-specified but not built** — `docs/connector-resilience-spec.md`. M2 is blocked
-on the firm's historical scam examples.
+specified but not built** — `docs/connector-resilience-spec.md`. **M1.6's
+evidence, provenance and disposition work is built** (§6, migration
+`d80ad4b1cb91`); `case_events` is not. M2 is blocked on the firm's historical
+scam examples.
 
-**Recommended order:** M0 → M1 → M1.5 → M2 → M4(1–5) → M3 → M5 → M6 → M7.
+**Recommended order:** M0 → M1 → ~~M1.6~~ → M1.5 → M2 → M4(1–5) → M3 → M5 → M6 → M7.
 
 Rationale: M0 is small and everything else is safer with it in place —
 particularly M1, whose duplicate-collapse cannot be expressed as an additive
@@ -540,7 +582,8 @@ actually works, and M4 steps 1–5 need nothing from anyone. M3's multi-tenancy
 is a big refactor with no customer-visible value, so it comes after we've
 confirmed the core is sound — but before M5, since enforcement needs org-scoped
 authorization records. The authorized-poster allowlist rides with M3 because it
-is org-scoped, and it **must** land before any real portfolio is loaded.
+is org-scoped, and it **must** land before any real portfolio is loaded — if a
+single-tenant stopgap is what it takes to get there sooner, take it (§6).
 
 ---
 

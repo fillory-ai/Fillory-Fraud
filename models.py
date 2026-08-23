@@ -1,4 +1,5 @@
 """Database models for rental fraud detector."""
+import json
 import uuid
 from datetime import datetime, timezone
 from sqlalchemy import (
@@ -176,6 +177,33 @@ class CaseStatus(enum.Enum):
     DISPUTED = "disputed"    # counter-notice received; all automation stops
 
 
+def _load_json(raw):
+    """Parse a JSON text column, tolerating NULL and anything malformed.
+
+    Evidence columns must never be able to break a list endpoint — a case that
+    cannot be displayed is worse than one displayed without its snapshot.
+    """
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+# Why a case was closed. Kept separate from CaseStatus because the status says
+# what happened to the case and the code says what it tells us about the
+# detector. Only the first three are failures we should be tuning against.
+RESOLUTION_CODES = {
+    "false_positive_match":     "Not our property — the address match was wrong",
+    "false_positive_authorized": "Our own or an authorised agent's advert",
+    "false_positive_legitimate": "A genuine third-party listing, correctly matched",
+    "confirmed_fraud":          "Confirmed impersonation",
+    "listing_removed":          "Listing gone from the platform",
+    "no_action":                "Reviewed, no action warranted",
+}
+
+
 class Case(Base):
     """A suspected impersonation of one property by one listing.
 
@@ -210,6 +238,25 @@ class Case(Base):
     change_log = Column(Text, nullable=True)
     resolved_at = Column(DateTime(timezone=True), nullable=True)
 
+    # ── Evidence and model governance ───────────────────────────────────────
+    # The listing exactly as it read when this case was opened, as JSON.
+    #
+    # scraped_listings rows are mutated in place on re-sighting, so without this
+    # the input that produced the verdict is destroyed the first time the poster
+    # edits their ad — which is precisely what someone who suspects they have
+    # been spotted will do. Write-once: set at open, never updated.
+    opening_evidence = Column(Text, nullable=True)
+    # Which model answered, and a hash of the prompt that was sent. Without
+    # these, a verdict from before a prompt edit and one from after are
+    # indistinguishable, and no past decision can be reproduced.
+    model_name = Column(String(100), nullable=True)
+    prompt_version = Column(String(32), nullable=True)
+    # Why a case was closed, distinct from the fact that it was. "dismissed"
+    # alone conflates a bad match, our own customer's advert, and a legitimate
+    # third party — three different bugs. This is the tuning feedback loop.
+    resolution_code = Column(String(50), nullable=True)
+    resolution_note = Column(Text, nullable=True)
+
     def to_dict(self):
         return {
             "id": str(self.id),
@@ -225,6 +272,11 @@ class Case(Base):
             "alert_count": self.alert_count or 0,
             "change_log": self.change_log,
             "resolved_at": self.resolved_at.isoformat() if self.resolved_at else None,
+            "opening_evidence": _load_json(self.opening_evidence),
+            "model_name": self.model_name,
+            "prompt_version": self.prompt_version,
+            "resolution_code": self.resolution_code,
+            "resolution_note": self.resolution_note,
         }
 
 
@@ -243,6 +295,10 @@ class Alert(Base):
     status = Column(String(50), default="pending")  # "pending", "sent", "failed"
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # The listing as it read at the moment this alert fired. The Case keeps the
+    # evidence at open; this keeps it at every subsequent alert, so a case that
+    # re-alerts after a material change has a record of both versions.
+    evidence_snapshot = Column(Text, nullable=True)
 
     def to_dict(self):
         return {
@@ -257,6 +313,7 @@ class Alert(Base):
             "status": self.status,
             "error_message": self.error_message,
             "created_at": self.created_at.isoformat() if self.created_at else None,
+            "evidence_snapshot": _load_json(self.evidence_snapshot),
         }
 
 

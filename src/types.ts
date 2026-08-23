@@ -124,6 +124,11 @@ export interface ScanHealthResponse extends ScanHealthData {
 
 export type CaseStatus = "open" | "acknowledged" | "filed" | "resolved" | "dismissed" | "disputed";
 
+export interface ResolutionCode {
+  code: string;
+  label: string;
+}
+
 export interface CaseData {
   id: string;
   listing_id: string;
@@ -140,6 +145,8 @@ export interface CaseData {
   change_log: string | null;
   resolved_at: string | null;
   alerts_recorded: number;
+  resolution_code: string | null;
+  resolution_note: string | null;
   listing: ScrapedListingData | null;
   property_name: string | null;
 }

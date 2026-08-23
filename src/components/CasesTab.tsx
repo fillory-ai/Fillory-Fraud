@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle,
@@ -13,11 +13,21 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
 import { ListingDetailDialog } from "@/components/ListingDetailDialog";
 import { cn } from "@/lib/utils";
-import type { CaseData, CaseStatus, PropertyData, ScrapedListingData } from "@/types";
+import type { CaseData, CaseStatus, PropertyData, ResolutionCode, ScrapedListingData } from "@/types";
 
 interface CasesTabProps {
   cases: CaseData[];
@@ -25,7 +35,7 @@ interface CasesTabProps {
   loading: boolean;
   filter: string;
   onFilterChange: (value: string) => void;
-  onUpdateStatus: (caseId: string, status: CaseStatus) => Promise<void>;
+  onUpdateStatus: (caseId: string, status: CaseStatus, resolution?: { code: string; note?: string }) => Promise<void>;
 }
 
 const formatDate = (v: string | null | undefined) =>
@@ -44,6 +54,21 @@ const STATUS_OPTIONS: { value: string; label: string }[] = [
 export function CasesTab({ cases, properties, loading, filter, onFilterChange, onUpdateStatus }: CasesTabProps) {
   const [selected, setSelected] = useState<ScrapedListingData | null>(null);
   const [updating, setUpdating] = useState<string | null>(null);
+  const [resolutionCodes, setResolutionCodes] = useState<ResolutionCode[]>([]);
+  const [resolutionDialog, setResolutionDialog] = useState<{ caseId: string; status: CaseStatus } | null>(null);
+  const [selectedCode, setSelectedCode] = useState<string>("");
+  const [resolutionNote, setResolutionNote] = useState<string>("");
+  const [resolutionError, setResolutionError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/cases/resolution-codes")
+      .then(r => r.json())
+      .then((data: ResolutionCode[]) => { if (!cancelled) setResolutionCodes(data); })
+      .catch(() => { /* codes will be empty, dialog shows fallback */ });
+    return () => { cancelled = true; };
+  }, []);
 
   const handleStatus = useCallback(
     async (caseId: string, status: CaseStatus) => {
@@ -55,6 +80,45 @@ export function CasesTab({ cases, properties, loading, filter, onFilterChange, o
       }
     },
     [onUpdateStatus],
+  );
+
+  const openResolutionDialog = useCallback((caseId: string, status: CaseStatus) => {
+    setResolutionDialog({ caseId, status });
+    setSelectedCode("");
+    setResolutionNote("");
+    setResolutionError(null);
+  }, []);
+
+  const closeResolutionDialog = useCallback(() => {
+    setResolutionDialog(null);
+    setSelectedCode("");
+    setResolutionNote("");
+    setResolutionError(null);
+  }, []);
+
+  const submitResolution = useCallback(async () => {
+    if (!resolutionDialog || !selectedCode) return;
+    setSubmitting(true);
+    setResolutionError(null);
+    try {
+      await onUpdateStatus(resolutionDialog.caseId, resolutionDialog.status, {
+        code: selectedCode,
+        note: resolutionNote.trim() || undefined,
+      });
+      closeResolutionDialog();
+    } catch (err) {
+      setResolutionError(err instanceof Error ? err.message : "Failed to update case");
+    } finally {
+      setSubmitting(false);
+    }
+  }, [resolutionDialog, selectedCode, resolutionNote, onUpdateStatus, closeResolutionDialog]);
+
+  const resolutionLabel = useCallback(
+    (code: string | null) => {
+      if (!code) return null;
+      return resolutionCodes.find(r => r.code === code)?.label ?? code;
+    },
+    [resolutionCodes],
   );
 
   return (
@@ -100,6 +164,8 @@ export function CasesTab({ cases, properties, loading, filter, onFilterChange, o
                 {cases.map(c => {
                   const listing = c.listing;
                   const pct = c.confidence == null ? null : Math.round(c.confidence <= 1 ? c.confidence * 100 : c.confidence);
+                  const isClosed = c.status === "resolved" || c.status === "dismissed";
+                  const resLabel = resolutionLabel(c.resolution_code);
                   return (
                     <TableRow
                       key={c.id}
@@ -118,6 +184,12 @@ export function CasesTab({ cases, properties, loading, filter, onFilterChange, o
                               </>
                             ) : "—"}
                           </span>
+                          {isClosed && resLabel && (
+                            <span className="mt-0.5 text-xs text-muted-foreground">
+                              <span className="font-medium text-foreground/70">Resolution:</span> {resLabel}
+                              {c.resolution_note && <span className="italic"> — {c.resolution_note}</span>}
+                            </span>
+                          )}
                         </div>
                       </TableCell>
                       <TableCell className="text-muted-foreground">{c.property_name ?? "—"}</TableCell>
@@ -162,7 +234,7 @@ export function CasesTab({ cases, properties, loading, filter, onFilterChange, o
                                 size="sm"
                                 variant="outline"
                                 disabled={updating === c.id}
-                                onClick={() => handleStatus(c.id, "resolved")}
+                                onClick={() => openResolutionDialog(c.id, "resolved")}
                                 className="gap-1"
                               >
                                 {updating === c.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle className="h-3.5 w-3.5" />}
@@ -172,7 +244,7 @@ export function CasesTab({ cases, properties, loading, filter, onFilterChange, o
                                 size="sm"
                                 variant="outline"
                                 disabled={updating === c.id}
-                                onClick={() => handleStatus(c.id, "dismissed")}
+                                onClick={() => openResolutionDialog(c.id, "dismissed")}
                                 className="gap-1"
                               >
                                 {updating === c.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldOff className="h-3.5 w-3.5" />}
@@ -215,6 +287,60 @@ export function CasesTab({ cases, properties, loading, filter, onFilterChange, o
           {loading && <div className="p-10 text-center text-sm text-muted-foreground">Loading cases…</div>}
         </CardContent>
       </Card>
+
+      <Dialog open={resolutionDialog !== null} onOpenChange={open => { if (!open) closeResolutionDialog(); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {resolutionDialog?.status === "resolved" ? "Resolve case" : "Dismiss case"}
+            </DialogTitle>
+            <DialogDescription>
+              Select a reason so we can measure precision and tune the detector.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="resolution-code">Reason</Label>
+              <Select value={selectedCode} onValueChange={setSelectedCode}>
+                <SelectTrigger id="resolution-code">
+                  <SelectValue placeholder="Choose a reason…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {resolutionCodes.map(rc => (
+                    <SelectItem key={rc.code} value={rc.code}>{rc.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="resolution-note">Note (optional)</Label>
+              <Textarea
+                id="resolution-note"
+                value={resolutionNote}
+                onChange={e => setResolutionNote(e.target.value)}
+                placeholder="Add context for this decision…"
+                rows={3}
+              />
+            </div>
+            {resolutionError && (
+              <p className="text-sm text-red-500">{resolutionError}</p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeResolutionDialog} disabled={submitting}>
+              Cancel
+            </Button>
+            <Button
+              onClick={submitResolution}
+              disabled={!selectedCode || submitting}
+              className="gap-1"
+            >
+              {submitting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              {resolutionDialog?.status === "resolved" ? "Resolve" : "Dismiss"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <ListingDetailDialog listing={selected} properties={properties} onOpenChange={open => { if (!open) setSelected(null); }} />
     </div>

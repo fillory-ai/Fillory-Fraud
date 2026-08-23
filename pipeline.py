@@ -208,6 +208,35 @@ def _upsert_listing(session, listing_data: dict) -> tuple[uuid.UUID, bool, bool]
     return listing.id, True, True
 
 
+# ── Evidence capture ────────────────────────────────────────────────────────
+
+# The fields that constitute evidence. Deliberately explicit rather than
+# "whatever is in the dict": a snapshot is a legal artefact and its shape should
+# change only on purpose.
+_EVIDENCE_FIELDS = (
+    "source", "external_id", "title", "price", "location", "street_address",
+    "description", "url", "image_urls", "posted_date", "latitude", "longitude",
+)
+
+
+def _evidence_snapshot(listing_data: dict, fingerprint: str | None = None) -> str:
+    """Freeze a listing exactly as it read at the moment of a decision.
+
+    scraped_listings rows are updated in place on re-sighting (see
+    `_upsert_listing`), so the text a verdict was based on is otherwise
+    destroyed the first time the poster edits their advert — which is exactly
+    what someone who suspects they have been spotted does. Without this we can
+    show *that* we called something fraud but not *what we saw*, which is both
+    the model-governance requirement and the thing we would need if an
+    accusation were ever challenged.
+    """
+    snapshot = {k: listing_data.get(k) for k in _EVIDENCE_FIELDS}
+    snapshot["captured_at"] = _now().isoformat()
+    if fingerprint:
+        snapshot["content_fingerprint"] = fingerprint
+    return json.dumps(snapshot, default=str)
+
+
 # ── Alert policy ────────────────────────────────────────────────────────────
 
 # An alert that consumed the day's budget, whether or not a text left the
@@ -273,6 +302,10 @@ def _record_alert(session, case: Case, listing_data: dict, listing_id, property_
         status=status,
         sent_at=now if status == "sent" else None,
         error_message=error,
+        # What this alert was actually about. The Case holds the evidence at
+        # open; this holds it at every re-alert, so a case that fires again
+        # after a material change has both versions on record.
+        evidence_snapshot=_evidence_snapshot(listing_data),
     )
     session.add(alert)
 
@@ -286,7 +319,8 @@ def _record_alert(session, case: Case, listing_data: dict, listing_id, property_
 
 
 def _open_or_update_case(
-    session, listing_id, property_id, result: dict, content_changed: bool
+    session, listing_id, property_id, result: dict, content_changed: bool,
+    listing_data: dict | None = None, fingerprint: str | None = None,
 ) -> tuple[Case, str]:
     """Return (case, action) where action is opened / changed / quiet.
 
@@ -308,6 +342,13 @@ def _open_or_update_case(
             confidence=result.get("confidence"),
             reason=result.get("reason"),
             match_signal=result.get("match_signal"),
+            # Write-once. Never updated on re-analysis — the whole point is
+            # that it records the listing as it was when we first accused it.
+            opening_evidence=(
+                _evidence_snapshot(listing_data, fingerprint) if listing_data else None
+            ),
+            model_name=result.get("model_name"),
+            prompt_version=result.get("prompt_version"),
         )
         session.add(case)
         try:
@@ -332,6 +373,12 @@ def _open_or_update_case(
 
     case.confidence = result.get("confidence")
     case.reason = result.get("reason")
+    # These describe the *current* verdict, so they move with confidence and
+    # reason. opening_evidence deliberately does not.
+    if result.get("model_name"):
+        case.model_name = result.get("model_name")
+    if result.get("prompt_version"):
+        case.prompt_version = result.get("prompt_version")
     case.updated_at = _now()
 
     # A case the user has already dealt with never re-alerts.
@@ -413,7 +460,9 @@ async def process_listing(listing_data: dict, property_dicts: list[dict]) -> dic
         if actionable:
             property_id = uuid.UUID(result["matched_property_id"])
             case, case_action = _open_or_update_case(
-                session, listing_id, property_id, result, content_changed
+                session, listing_id, property_id, result, content_changed,
+                listing_data=listing_data,
+                fingerprint=content_fingerprint(listing_data),
             )
             if case_action in ("opened", "changed"):
                 prop = session.query(Property).filter_by(id=property_id).first()

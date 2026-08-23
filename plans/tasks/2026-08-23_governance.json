@@ -1,0 +1,32 @@
+[
+  {
+    "content": "[gov-1] Read detector.py + pipeline case/alert paths to place snapshot and version capture",
+    "id": "1",
+    "status": "completed"
+  },
+  {
+    "content": "[gov-2] Models: Case.opening_evidence/model_name/prompt_version/resolution_code + Alert.evidence_snapshot",
+    "id": "2",
+    "status": "completed"
+  },
+  {
+    "content": "[gov-3] Alembic revision with server_defaults where needed",
+    "id": "3",
+    "status": "completed"
+  },
+  {
+    "content": "[gov-4] Pipeline + detector wiring; routes PUT accepts resolution_code",
+    "id": "4",
+    "status": "completed"
+  },
+  {
+    "content": "[gov-5] CasesTab dismiss captures a disposition code; tests for all three",
+    "id": "5",
+    "status": "completed"
+  },
+  {
+    "content": "[gov-6] Fold items 4-7 + Apify actor ownership into specs; commit and push",
+    "id": "6",
+    "status": "pending"
+  }
+]
