@@ -89,6 +89,46 @@ def _meaningful_tokens(addr: str, extra_stop: set[str]) -> set[str]:
     return {t for t in tokens if t not in _ADDRESS_STOPWORDS and t not in extra_stop}
 
 
+_ZIP5_RE = re.compile(r"^\d{5}$")
+_ZIP_PLUS4_RE = re.compile(r"\b(\d{5})-(\d{4})\b")
+
+
+def _is_zip_token(token: str) -> bool:
+    """A bare 5-digit ZIP. Shared by every listing in the neighbourhood, so it
+    can never on its own establish that two addresses are the same place."""
+    return bool(_ZIP5_RE.match(token))
+
+
+def _extract_zip_plus4(*texts: str) -> Optional[str]:
+    """Pull a normalized 9-digit ZIP+4 out of the first text that has one."""
+    for text in texts:
+        if not text:
+            continue
+        match = _ZIP_PLUS4_RE.search(str(text))
+        if match:
+            return match.group(1) + match.group(2)
+    return None
+
+
+def _zip_plus4_match(listing: dict, prop: dict) -> Optional[str]:
+    """Exact ZIP+4 agreement between a listing and a property.
+
+    A ZIP+4 covers roughly one block face or a single building, so agreement
+    puts the listing at the property's front door — far tighter than the
+    5-digit ZIP, though not proof of the same unit.
+    """
+    prop_zip4 = _extract_zip_plus4(prop.get("zip_plus4") or "")
+    if not prop_zip4:
+        return None
+    listing_zip4 = _extract_zip_plus4(
+        listing.get("street_address") or "",
+        listing.get("location") or "",
+    )
+    if listing_zip4 and listing_zip4 == prop_zip4:
+        return f"{prop_zip4[:5]}-{prop_zip4[5:]}"
+    return None
+
+
 def _address_match_score(
     listing_location: str, property_address: str, extra_stop: set[str] | None = None
 ) -> float:
@@ -105,11 +145,19 @@ def _address_match_score(
     if not listing_norm or not prop_norm:
         return 0.0
 
-    # Direct substring check (one contained in the other). Only applies to
-    # sufficiently long strings so generic city names like "portland" don't
-    # match every property address in that city.
+    # Street numbers, computed up front — they gate both the substring
+    # shortcut and the token-overlap bonus below.
+    listing_num = _extract_street_number(listing_location)
+    prop_num = _extract_street_number(property_address)
+    numbers_agree = bool(listing_num and prop_num and listing_num == prop_num)
+
+    # Direct substring check (one contained in the other). Requires the street
+    # numbers to agree, otherwise a listing carrying only "Portland, OR, 97218"
+    # is a literal substring of every property address in that ZIP and scores a
+    # perfect 1.0. That exact bug matched a $600 roommate-wanted post to a
+    # registered townhome.
     min_len = 15
-    if len(listing_norm) >= min_len and len(prop_norm) >= min_len:
+    if numbers_agree and len(listing_norm) >= min_len and len(prop_norm) >= min_len:
         if listing_norm in prop_norm or prop_norm in listing_norm:
             return 1.0
 
@@ -126,11 +174,15 @@ def _address_match_score(
     # Street number match bonus — only when the street number matches AND at
     # least one meaningful non-numeric token (street name) is shared, so
     # "4411 Killingsworth" matches but "4411 Broadway" does not.
-    listing_num = _extract_street_number(listing_location)
-    prop_num = _extract_street_number(property_address)
-    if listing_num and prop_num and listing_num == prop_num:
+    if numbers_agree:
         if any(not t.isdigit() for t in intersection - {listing_num}):
             jaccard = max(jaccard, 0.6)
+
+    # Overlap consisting of nothing but 5-digit ZIPs is neighbourhood-level
+    # evidence, never identity. Cap it below the match threshold so it can
+    # narrow candidates but never declare a match on its own.
+    if intersection and not any(not _is_zip_token(t) for t in intersection):
+        return min(jaccard, 0.3)
 
     return jaccard
 
@@ -179,13 +231,19 @@ def _geo_distance_metres(listing: dict, prop: dict) -> Optional[float]:
 def _find_best_address_match(listing: dict, properties: list[dict]) -> Optional[dict]:
     """Find the property this listing refers to, if any.
 
-    Three independent signals, strongest first:
-      1. Geo proximity — listing coordinates within GEO_MATCH_RADIUS_METRES of
-         the property. Robust to any spelling of the address.
-      2. Address-field text score — against the enriched `street_address` from
-         the Craigslist detail page, falling back to the `location` field.
-      3. Address mentioned in the title or body text — how a scammer who
-         doesn't fill in the address field still gives themselves away.
+    Four independent signals, strongest first:
+      1. Geo proximity (1.0) — listing coordinates within
+         GEO_MATCH_RADIUS_METRES of the property. Robust to any spelling.
+      2. Address in title/body (0.9) — how a scammer who leaves the address
+         field blank still gives themselves away.
+      3. Address-field text score (0..1) — against the enriched
+         `street_address` from the detail page, falling back to `location`.
+      4. ZIP+4 agreement (0.7) — a ZIP+4 covers about one block face or one
+         building. This is the only geo hook available on Facebook, which
+         publishes ZIP+4 for ~80% of listings but never a street address.
+
+    A shared 5-digit ZIP is deliberately NOT a signal — it is
+    neighbourhood-level and capped below the 0.5 threshold.
     """
     best_match: Optional[dict] = None
     best_score = 0.0
@@ -213,8 +271,12 @@ def _find_best_address_match(listing: dict, properties: list[dict]) -> Optional[
         else:
             score = _address_match_score(address_text, prop_full_addr, extra_stop)
             signal = "address field"
-            if score < 0.5 and _text_contains_address(body_text, prop, extra_stop):
+            if score < 0.9 and _text_contains_address(body_text, prop, extra_stop):
                 score, signal = 0.9, "address in title/body"
+            if score < 0.7:
+                zip4 = _zip_plus4_match(listing, prop)
+                if zip4:
+                    score, signal = 0.7, f"zip+4 ({zip4})"
 
         if score > best_score:
             best_score, best_match, best_signal = score, prop, signal

@@ -24,6 +24,11 @@ class Property(Base):
     city = Column(String(200), nullable=False)
     state = Column(String(100), nullable=False)
     zip_code = Column(String(20), nullable=True)
+    # Full USPS ZIP+4 (e.g. "97218-1234"). A ZIP+4 resolves to roughly one
+    # block face or one building, so an exact match is a far stronger signal
+    # than the 5-digit ZIP. Facebook listings expose ZIP+4 ~80% of the time
+    # but never a street address, making this the only usable geo hook there.
+    zip_plus4 = Column(String(12), nullable=True)
     bedrooms = Column(Integer, nullable=True)
     bathrooms = Column(Float, nullable=True)
     square_footage = Column(Integer, nullable=True)
@@ -45,6 +50,7 @@ class Property(Base):
             "city": self.city,
             "state": self.state,
             "zip_code": self.zip_code,
+            "zip_plus4": self.zip_plus4,
             "bedrooms": self.bedrooms,
             "bathrooms": self.bathrooms,
             "square_footage": self.square_footage,

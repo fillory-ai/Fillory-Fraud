@@ -43,6 +43,7 @@ class PropertyCreate(BaseModel):
     city: str
     state: str
     zip_code: str | None = None
+    zip_plus4: str | None = None
     bedrooms: int | None = None
     bathrooms: float | None = None
     square_footage: int | None = None
@@ -58,6 +59,7 @@ class PropertyUpdate(BaseModel):
     city: str | None = None
     state: str | None = None
     zip_code: str | None = None
+    zip_plus4: str | None = None
     bedrooms: int | None = None
     bathrooms: float | None = None
     square_footage: int | None = None
@@ -278,6 +280,7 @@ def create_app(static_dir: str) -> FastAPI:
             city=data.city,
             state=data.state,
             zip_code=data.zip_code,
+            zip_plus4=data.zip_plus4,
             bedrooms=data.bedrooms,
             bathrooms=data.bathrooms,
             square_footage=data.square_footage,
@@ -309,6 +312,8 @@ def create_app(static_dir: str) -> FastAPI:
             prop.state = data.state
         if data.zip_code is not None:
             prop.zip_code = data.zip_code
+        if data.zip_plus4 is not None:
+            prop.zip_plus4 = data.zip_plus4
         if data.bedrooms is not None:
             prop.bedrooms = data.bedrooms
         if data.bathrooms is not None:

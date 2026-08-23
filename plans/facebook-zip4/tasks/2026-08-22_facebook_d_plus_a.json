@@ -1,0 +1,32 @@
+[
+  {
+    "content": "[D] Tighten match floor so bare-ZIP/city-only no longer counts as a match",
+    "id": "1",
+    "status": "completed"
+  },
+  {
+    "content": "[A] Add Property.zip_plus4 column + migration",
+    "id": "2",
+    "status": "completed"
+  },
+  {
+    "content": "[A] Parse ZIP+4 from listing location; add ZIP+4 signal to _find_best_address_match",
+    "id": "3",
+    "status": "completed"
+  },
+  {
+    "content": "[A] Expose zip_plus4 in property API + Properties UI form",
+    "id": "4",
+    "status": "completed"
+  },
+  {
+    "content": "Regression-test matcher (incl. prior 10 cases + new ZIP+4/bare-ZIP cases)",
+    "id": "5",
+    "status": "completed"
+  },
+  {
+    "content": "Re-run against real FB rows; verify roommate false match is gone; commit+push",
+    "id": "6",
+    "status": "pending"
+  }
+]

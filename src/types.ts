@@ -11,6 +11,7 @@ export interface PropertyData {
   city: string;
   state: string;
   zip_code: string | null;
+  zip_plus4: string | null;
   bedrooms: number | null;
   bathrooms: number | null;
   square_footage: number | null;
